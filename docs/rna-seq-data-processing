@@ -1,0 +1,266 @@
+Downloading fastq files
+
+Using sratoolkit and the following code I downloaded the SRR samples from GSE72996. Only the rna-seq data was included not the ribosome profiling data. 
+
+----
+#!/bin/bash
+# Ensure that SRA Toolkit is in your PATH
+export PATH=$PATH:/path/to/sratoolkit/bin
+
+# Function to download and convert SRA to FASTQ
+download_fastq() {
+    local accession=$1
+
+    echo "Downloading SRA data for accession: $accession"
+    prefetch $accession
+
+    if [ $? -ne 0 ]; then
+        echo "Error downloading SRA data for $accession"
+        exit 1
+    fi
+
+    echo "Converting SRA to FASTQ for accession: $accession"
+    fastq-dump --split-files ./$accession/$accession.sra
+
+    if [ $? -ne 0 ]; then
+        echo "Error converting SRA to FASTQ for $accession"
+        exit 1
+    fi
+
+    echo "Download and conversion complete for accession: $accession"
+}
+
+#  download a list of accessions
+accessions=(SRR2392993 SRR2392994 SRR2392995 SRR2392996)
+
+for acc in "${accessions[@]}"; do
+    download_fastq $acc
+done
+----
+
+Fastq files QC checking 
+
+Preliminary qc check of data aquired was carried out using the following code. All 4 samples passed most of the tests with 
+notable exception of "per base sequence content" which failed the test in 3 samples and was flagged in 1.  
+
+----
+#!/bin/bash
+# Runs FASTQC on all fastq.gz files found in given directory
+# Run as:
+# ./run_fastqc dir_of_fastq_files
+
+module load fastqc
+
+FASTQC_DIR="fastqc"
+
+echo "Running FASTQC using executable: $FASTQC_DIR"
+
+for fastq_file in $1/*.fastq;
+do
+  echo "Fastq file: $fastq_file"
+  $FASTQC_DIR $fastq_file -o .
+done
+----
+
+Fastq reads trimming 
+
+Fastq files were trimmed using fastp and the following code to remove adapters.
+
+----
+#!/bin/bash
+# Runs fastp in SE mode for all .fastq.gz files in a directory
+# Run as:
+# ./run_fastp.sh directory_of_samples 
+# ./run_fastp.sh ../data
+
+timestamp=`date "+%Y%m%d-%H%M%S"`
+logfile="run_$timestamp.log"
+exec > $logfile 2>&1  #all output will be logged to logfile
+
+FASTP_EXEC="/d/in7/s/fastp/fastp"
+DIR=$1
+ADAPTER_FILE="/d/in16/u/ubcg71a/research/ASD/data/adapters/adapters.fa"
+
+echo "Running fastp using executable: $FASTP_EXEC"
+
+for file in `ls $DIR/*.fastq`;
+do
+  sample=${file/$DIR\//}
+  sample=${sample/.fastq/}
+  echo "Sample= $sample"
+  $FASTP_EXEC -i  "$DIR/$sample".fastq  \
+         -o "$sample"_trimmed.fastq.gz \
+         --adapter_fasta $ADAPTER_FILE \
+         -l 30 --trim_poly_x \
+         -h "$sample"_fastp.html -j "$sample"_fastp.json
+done
+----
+
+Mapping 
+
+Sequences were mapped to Mycobacteroides_abscessus_atcc_19977 genome with acessionb code of GCA_000069185. 
+Index file was created using bwa (bwa index GCA_000069185.fasta) and mapping was done using bwa, samtools and the following code.
+
+Issues
+Can not have a gz version of fastq or error apears
+not sure why my fastq files have a _1_ at the end but it needs to be included to load the code 
+creating an index file using bwa needed before runing this code 
+----
+#!/bin/bash
+
+# Runs bwa in single end mode 
+
+# Run as:
+# run_bwa.sh directory_of_fastq_files samples
+# ./run_bwa.sh ../fqtrim/ SRR2392993_1_ SRR2392994_1_ SRR2392995_1_ SRR2392996_1_
+
+
+
+timestamp=`date "+%Y%m%d-%H%M%S"`
+logfile="run_$timestamp.log"
+exec > $logfile 2>&1  #all output will be logged to logfile
+
+dir=$1
+shift
+
+#set location of executables
+BWA_EXEC="/s/software/bwa/bin/bwa"
+SAMTOOLS_EXEC="/s/software/samtools/v1.9/bin/samtools"
+
+
+#set parameters
+genomeFile="../genome/GCA_000069185.fasta" #index files should be there too!
+numProc=8
+
+#extension for fastq files
+suffix="trimmed.fastq"
+
+for sample in "$@";
+do
+   echo "Running bwa on sample $sample (single-end mode)..."
+
+   unpairedFile="$dir$sample$suffix"
+   if [ -f $unpairedFile ]
+   then
+      gzip -d $unpairedFile
+      unpairedFile=$dir$sample$suffix
+   else
+      unpairedFile=$dir$sample$suffix
+      if [ ! -f $unpairedFile ]
+      then
+         echo "File not found: $unpairedFile"
+         exit $?
+      fi
+   fi
+   tmpBinary="$sample"_sa.sai
+   tmpSam="$sample"_se.sam
+   tmpBam="$sample"_se.bam
+   finalSortedBam="$sample"_sorted.bam
+
+   #align 
+   $BWA_EXEC aln -t $numProc $genomeFile $unpairedFile > $tmpBinary
+   #create sam file
+   $BWA_EXEC samse $genomeFile $tmpBinary $unpairedFile > $tmpSam
+   #create bam file
+   $SAMTOOLS_EXEC view $tmpSam -Sbo $tmpBam
+   $SAMTOOLS_EXEC sort $tmpBam -o $finalSortedBam
+   $SAMTOOLS_EXEC index $finalSortedBam
+
+   #cleanup
+   /bin/rm $tmpSam $tmpBam
+   /bin/rm $tmpBinary
+   gzip -9 $unpairedFile
+
+done
+
+
+echo "All done!"
+
+
+
+   #cleanup
+   /bin/rm $tmpSam $tmpBam
+   /bin/rm $tmpBinary1 $tmpBinary2
+   #gzip -9 $pairedFile1 $pairedFile2
+
+done
+
+
+echo "All done!"#!/bin/bash
+
+# Runs bwa in single end mode
+
+# Run as:
+# ./run_bwa.sh directory_of_fastq_files samples
+# Example: ./run_bwa.sh ../fqtrim/ SRR13281064
+
+timestamp=$(date "+%Y%m%d-%H%M%S")
+logfile="run_$timestamp.log"
+exec > "$logfile" 2>&1  # all output will be logged to logfile
+
+dir=$1
+shift
+
+# Set location of executables
+BWA_EXEC="/s/software/bwa/bin/bwa"
+SAMTOOLS_EXEC="/s/software/samtools/v1.9/bin/samtools"
+
+# Set parameters
+BWA_INDEX="../genome/Mycobacteroides_abscessus_atcc_19977_gca_000069185.ASM6918v1.59"  # Prefix of the BWA index files
+numProc=8
+
+# Extension for fastq files
+suffix="_1_trimmed.fastq"
+
+for sample in "$@";
+do
+   echo "Running bwa on sample $sample (single-end mode)..."
+
+   unpairedFile="$dir$sample$suffix".gz
+   if [ -f $unpairedFile ]
+   then
+      gzip -d $unpairedFile
+      unpairedFile=$dir$sample$suffix
+   else
+      unpairedFile=$dir$sample$suffix
+      if [ ! -f $unpairedFile ]
+      then
+         echo "File not found: $unpairedFile"
+         exit $?
+      fi
+   fi
+   tmpBinary="$sample"_sa.sai
+   tmpSam="$sample"_se.sam
+   tmpBam="$sample"_se.bam
+   finalSortedBam="$sample"_sorted.bam
+
+   #align 
+   $BWA_EXEC aln -t $numProc $genomeFile $unpairedFile > $tmpBinary
+   #create sam file
+   $BWA_EXEC samse $genomeFile $tmpBinary $unpairedFile > $tmpSam
+   #create bam file
+   $SAMTOOLS_EXEC view $tmpSam -Sbo $tmpBam
+   $SAMTOOLS_EXEC sort $tmpBam -o $finalSortedBam
+   $SAMTOOLS_EXEC index $finalSortedBam
+
+   #cleanup
+   /bin/rm $tmpSam $tmpBam
+   /bin/rm $tmpBinary
+   gzip -9 $unpairedFile
+
+done
+
+
+echo "All done!"
+----
+
+Notes to self 
+
+setting up toth = ssh thoth.cryst.bbk.ac.uk
+loading modules = module load module name 
+get current directory = pwd
+change current directory = chdir target_directory
+change file permissions = chmod +x file_name
+find directory of a module = which module_name 
+
+
