@@ -262,5 +262,7 @@ get current directory = pwd
 change current directory = chdir target_directory
 change file permissions = chmod +x file_name
 find directory of a module = which module_name 
+create new folder = mkdir foldername
+remove folder = rmdir foldername
 
 
