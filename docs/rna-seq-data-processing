@@ -1,55 +1,21 @@
 Downloading fastq files
 
-Using sratoolkit and the following code I downloaded the SRR samples from GSE72996. Only the rna-seq data was included not the ribosome profiling data. 
-
-----
-#!/bin/bash
-# Ensure that SRA Toolkit is in your PATH
-export PATH=$PATH:/path/to/sratoolkit/bin
-
-# Function to download and convert SRA to FASTQ
-download_fastq() {
-    local accession=$1
-
-    echo "Downloading SRA data for accession: $accession"
-    prefetch $accession
-
-    if [ $? -ne 0 ]; then
-        echo "Error downloading SRA data for $accession"
-        exit 1
-    fi
-
-    echo "Converting SRA to FASTQ for accession: $accession"
-    fastq-dump --split-files ./$accession/$accession.sra
-
-    if [ $? -ne 0 ]; then
-        echo "Error converting SRA to FASTQ for $accession"
-        exit 1
-    fi
-
-    echo "Download and conversion complete for accession: $accession"
-}
-
-#  download a list of accessions
-accessions=(SRR2392993 SRR2392994 SRR2392995 SRR2392996)
-
-for acc in "${accessions[@]}"; do
-    download_fastq $acc
-done
-----
+-fastq files downloaded from ENA using wget 
 
 Fastq files QC checking 
 
 Preliminary qc check of data aquired was carried out using the following code. All 4 samples passed most of the tests with 
 notable exception of "per base sequence content" which failed the test in 3 samples and was flagged in 1.  
 
+Prior to running the code below fastqc module was loaded using module load command.
+
+module load fastqc
+
 ----
 #!/bin/bash
 # Runs FASTQC on all fastq.gz files found in given directory
 # Run as:
 # ./run_fastqc dir_of_fastq_files
-
-module load fastqc
 
 FASTQC_DIR="fastqc"
 
@@ -62,7 +28,12 @@ do
 done
 ----
 
-Fastq reads trimming 
+The QC files were then combined into one report using:
+module load python/v3
+
+multiqc /d/user6/pl003/ProjectWork/data_processing/fastqc/
+
+<h>Fastq reads trimming <h> 
 
 Fastq files were trimmed using fastp and the following code to remove adapters.
 
