@@ -1,0 +1,2065 @@
+---
+title: "Mycobacteria tuberculosis Modules"
+output: html_notebook
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#installation of R packages 
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+#BiocManager::install("rtracklayer")
+library(rtracklayer)
+#BiocManager::install("DESeq2")
+library(DESeq2)
+#install.packages("dendextend")
+library(dendextend)
+#install.packages("viridis")
+library(viridis)
+#install.packages("devtools")
+library(devtools)
+#devtools::install_github("irilenia/baerhunter")
+library(baerhunter)
+library(dplyr)
+library(GenomicRanges)
+library(IRanges)
+library(ggplot2)
+library(WGCNA)
+library(GenomicAlignments)
+library(Rsamtools)
+library(Rsubread)
+library(here)
+library(limma)
+library(readr)
+#BiocManager::install("EnhancedVolcano")
+library(EnhancedVolcano)
+library(here)
+#library(data.table)
+#BiocManager::install("edgeR", dependencies = TRUE)
+library(edgeR)
+
+library(dendextend)
+library(viridis)
+library(patchwork)
+
+#import app functions 
+source(here("Code/baerhunter-shinyapp-main/R/fct_serve_data2.R"))
+source(here("Code/baerhunter-shinyapp-main/R/fct_bam_processing.R"))
+source(here("Code/baerhunter-shinyapp-main/R/fct_summary.R"))
+source(here("Code/baerhunter-shinyapp-main/R/fct_plot_cvg.R"))
+
+#import modified Baerhunter code for use with plasmid 
+source(here("Code/baerhunter/feature_file_editor.R"))
+
+```
+
+
+
+## 1) RNA-seq processing and mapping:
+
+Datasets downloaded from ENA. 
+
+4 RNA-seq datasets were used to make network: PRJNA694147(GSE165352), PRJNA886436(GSE214640), PRJNA917642(GSE222081) and PRJNA1001307(GSE239869)
+
+Using fastp and BWA
+
+## 2) Mapping coverage estimated to aid paramater selection 
+
+	PRJNA313774 = 787
+
+```{r preliminaries}
+datasets <- c("PRJNA694147", "PRJNA886436", "PRJNA917642", "PRJNA1001307", "PRJNA313774", "PRJNA295556")
+# create a directory to hold the output files..
+for (dataset in datasets) {
+  if (!dir.exists(here("Output", dataset))) {dir.create(here("Output", dataset))}
+}
+
+```
+
+
+
+```{r PRJNA917642}
+#set directory of bam files
+datasets <- c("PRJNA694147", "PRJNA886436", "PRJNA917642", "PRJNA1001307", "PRJNA313774", "PRJNA295556")
+
+bam_files <- c()
+original_annotation_file <- here("Genome/GCA_000069185.gff3")
+original_sRNA_annotation <- "unknown"
+refseq_name <- "Chromosome"
+for (dataset in datasets) {
+  dir <- here("Data", dataset)
+  bam_names <- list.files(dir, pattern = "_sorted.bam$")
+  #clear bam_files variable and add a dierectory for each file based on dir and bam names
+  for (name in bam_names) {bam_files <- append(bam_files , paste(dir,name, sep="/"))}
+    #paired_end_data <- TRUE
+    gaps <- igr_strand_specific(original_annotation_file, original_sRNA_annotation )
+    gaps_plus <- gaps$gaps_plus
+    gaps_minus <- gaps$gaps_minus
+    results <- Map(function(bam_file, bam_name) {
+          process_bam_file(bam_file = bam_file, bam_name = bam_name, gaps_plus = gaps_plus, gaps_minus = gaps_minus)}, bam_files, bam_names) 
+    
+    # Extract and combine all coverage data frames
+    combined_coverage_df <- bind_rows(lapply(results, `[[`, "coverage_df"))
+    
+    # Extract and combine all percentiles data frames
+    combined_percentiles_df <- bind_rows(lapply(results, `[[`, "percentiles_df"))
+    output <- here("Output", dataset)
+    
+    write.csv(combined_percentiles_df, file =  paste(output, "/", dataset, ".csv", sep = "") , row.names = TRUE)
+    write.csv(combined_coverage_df, file =  paste(output, "/", dataset, "_coverage.csv", sep = "") , row.names = TRUE)
+}
+
+for (dataset in datasets) {
+    combined_coverage_df <-  fread(here(paste(output, "/", dataset, "_coverage.csv", sep = "")))
+    #create the plots
+    ggplot2::ggplot(combined_coverage_df, ggplot2::aes(x = File, y = log2(Coverage), fill = File)) +
+      PupillometryR::geom_flat_violin(position = ggplot2::position_nudge(x = .25, y = 0), adjust = 2, trim = FALSE) +
+      ggplot2::geom_boxplot(outlier.shape = NA, alpha = 0.3, width = .1, colour = "BLACK") +
+      ggplot2::ylab('log2(Coverage)') + ggplot2::xlab('Files') + ggplot2::coord_flip() +
+      cowplot::theme_cowplot() + ggplot2::guides(fill = FALSE)
+    
+    ggsave(here("Output", dataset, paste(dataset, ".png")))
+}   
+
+```
+
+
+Following preliminary mapping using P90 for low and high coverage cutoff. Low coverage cutoff was adjusted to allow for discovery of as many known ncRNAs while limiting noise. High coverage was set to optimise the length of predictions to be as close to original annotations as possible. 
+
+To visualise this following code was ran on each preliminary prediction.
+
+
+## 3) Transcript prediction:
+
+Baerhunter run separately on each dataset with custom set of parameters to get annotations for each dataset.
+
+
+low/high coverage cutoff for each dataset:
+PRJNA694147(GSE165352): low=500, high=1000 
+PRJNA886436(GSE214640): low=500, high=700
+PRJNA917642(GSE222081): low=500, high=1000 
+PRJNA1001307(GSE239869): low=400, high=700 
+PRJNA313774(GSE78787): low= 200 , high= 400 
+PRJNA295556(GSE72996): low= 50, high=100 
+
+All other parameters remained the same
+
+Sample script:
+
+
+
+```{r PRJNA694147, eval=FALSE}
+feature_file_editor(bam_directory=here("Data/PRJNA694147"),
+                    original_annotation_file="GCA_000069185.gff3",
+                    annot_file_dir = here("Genome"),
+                    output_file=here("Output/PRJNA694147/PRJNA694147_500,1000.gff3"),
+                    original_sRNA_annotation="unknown", 
+                    low_coverage_cutoff=500, 
+                    min_sRNA_length=40, 
+                    high_coverage_cutoff=1000, 
+                    min_UTR_length=50, 
+                    paired_end_data=TRUE, 
+                    strandedness="stranded")
+```
+
+
+
+```{r PRJNA886436}
+feature_file_editor(bam_directory= here("Data/PRJNA886436"),
+                    original_annotation_file="GCA_000069185.gff3",
+                    annot_file_dir =  here("Genome"),
+                    output_file=here("Output/PRJNA886436/PRJNA886436_500,700.gff3"), 
+                    original_sRNA_annotation="unknown", 
+                    low_coverage_cutoff=500, 
+                    min_sRNA_length=40, 
+                    high_coverage_cutoff=700, 
+                    min_UTR_length=50, 
+                    paired_end_data=TRUE,  
+                    strandedness="stranded")
+```
+
+
+
+```{r PRJNA917642}
+
+feature_file_editor(bam_directory= here("Data/PRJNA917642"),
+                    original_annotation_file="GCA_000069185.gff3",
+                    annot_file_dir =  here("Genome"),
+                    output_file=here("Output/PRJNA917642/PRJNA917642_500,1000.gff3"), 
+                    original_sRNA_annotation="unknown",
+                    low_coverage_cutoff=500, 
+                    min_sRNA_length=40, 
+                    high_coverage_cutoff=1000, 
+                    min_UTR_length=50, 
+                    paired_end_data=TRUE, 
+                    strandedness="stranded")
+
+```
+
+
+
+```{r PRJNA1001307}
+feature_file_editor(bam_directory= here("Data/PRJNA1001307"),
+                    original_annotation_file="GCA_000069185.gff3",
+                    annot_file_dir =  here("Genome"),
+                    output_file=here("Output/PRJNA1001307/PRJNA1001307_400,700.gff3"), 
+                    original_sRNA_annotation="unknown", 
+                    low_coverage_cutoff=400, 
+                    min_sRNA_length=40, 
+                    high_coverage_cutoff=700, 
+                    min_UTR_length=50, 
+                    paired_end_data=TRUE, 
+                    strandedness="stranded")
+```
+
+
+
+```{r PRJNA313774}
+feature_file_editor(bam_directory= here("Data/PRJNA313774"),
+                    original_annotation_file="GCA_000069185.gff3",
+                    annot_file_dir =  here("Genome"),
+                    output_file=here("Output/PRJNA313774/PRJNA313774_200,400.gff3"), 
+                    original_sRNA_annotation="unknown", 
+                    low_coverage_cutoff=200, 
+                    min_sRNA_length=40, 
+                    high_coverage_cutoff=400, 
+                    min_UTR_length=50, 
+                    paired_end_data=FALSE, 
+                    strandedness="stranded")
+```
+
+```{r PRJNA295556}
+feature_file_editor(bam_directory= here("Data/PRJNA295556"),
+                    original_annotation_file="GCA_000069185.gff3",
+                    annot_file_dir =  here("Genome"),
+                    output_file=here("Output/PRJNA295556/PRJNA295556_50,100.gff3"), 
+                    original_sRNA_annotation="unknown", 
+                    low_coverage_cutoff=50, 
+                    min_sRNA_length=40, 
+                    high_coverage_cutoff=100, 
+                    min_UTR_length=50, 
+                    paired_end_data=FALSE, 
+                    strandedness="stranded")
+```
+
+Used adapted code from Ashwani to produce count tables for predicted features
+
+```{r}
+#datsets <- c("PRJNA694147", "PRJNA886436", "PRJNA917642", "PRJNA1001307", "PRJNA313774", "PRJNA295556")
+datsets <- c("PRJNA694147","PRJNA917642")
+for (dataset in datasets) {
+  dir <- here("Output", dataset)
+  gff_names <- list.files(dir, pattern = ".gff3$")
+  original <- here("Genome/GCA_000069185.gff3")
+  RefSeqname <- "Chromosome"
+  for (name in gff_names) {
+     print(name)
+     baerhunter_annot <- paste(dir, name, sep="/")
+     df <- ncrna_annot_compare(original,baerhunter_annot, RefSeqname)
+     
+     sRNA_UTR_df <- df[1]
+     overlap_df <- df[2]
+     counts_df <- df[3]
+     unique_df <- df[4]
+     undetected_annot <- df[5]
+       
+     write.csv(counts_df, file = here("Output",dataset, sub(".gff3", "_count.csv", name)))
+     write.csv(unique_df, file = here("Output", dataset,  sub(".gff3", "_unique.csv", name)))
+     write.csv(undetected_annot, file = here("Output", dataset, sub(".gff3", "_undetected.csv", name))) }
+}
+
+```
+
+
+These gff files were generated from the 6 datasets:
+
+PRJNA295556_50,100.gff3 
+PRJNA313774_200,400.gff3 
+PRJNA1001307_400,700.gff3 
+PRJNA917642_500,1000.gff3
+PRJNA886436_500,700.gff3
+PRJNA694147_500,1000.gff3
+
+## 4) Feature Quantification
+
+Quantify transcript counts for each dataset. Perform TPM normalisation and flag low expression transcripts.
+
+```{r expression_quantification, eval=F}
+
+# Script to iterate through datasets, counting reads, performing tpm normalisation, and flagging features for low expression.
+
+# list of single end datasets 
+datasets <- c("PRJNA313774", "PRJNA295556")
+
+for (dataset in datasets) {
+  # create new directory for results
+  count_dir <- paste("Output/count_output_", dataset, sep="")
+  count_dir <- here(count_dir)
+  if (!(dir.exists(here(count_dir)))) {dir.create(here(count_dir))}
+  #set up all variables
+  dir <- here("Output", dataset)
+  data <- here("Data/", dataset)
+  ann_file <- list.files(path = dir, pattern = ".gff3$")
+  count_files <- list.files(path = count_dir, pattern = "Counts.csv$") 
+  #run count_feature function for all files in the output directory for each paired dataset 
+  for (file in ann_file) {
+    filename <- sub(".gff3", "", file)
+    count_features(bam_dir=data,
+                annotation_dir=dir,
+                annotation_file=file,
+                output_dir=count_dir,
+                chromosome_alias_file=here("chromosome.txt"),
+                strandedness="stranded",
+                is_paired_end=FALSE,
+                output_filename = filename)
+    cat(sprintf("Completed initial count features for dataset: %s \n", dataset))
+    #tpm normalisation
+    tpm_output <- paste(dir, "/", dataset, "_TPM.csv", sep="")
+    gff <-  paste(dir,ann_file, sep="/")
+    for (file in count_files) {
+      count_file <-here(count_dir,file)
+      tpm_normalisation(
+                count_table = count_file,
+                complete_ann = gff,
+                output_file = tpm_output,
+                feature_type = c("putative_sRNA", "putative_UTR")) 
+      cat(sprintf("Completed tpm_normalisation calculations for dataset: %s \n", dataset))
+      #tpm flagging
+      flag_output <- paste(dir, "/", dataset, "_flagged.gff3", sep="")
+      tpm_flagging(tpm_data= tpm_output, 
+              complete_annotation = paste(dir,ann_file, sep="/"), 
+              output_file= flag_output)
+      cat(sprintf("Completed tpm flagging for dataset: %s \n", dataset)) 
+    }
+  }
+}
+
+  
+################ TPM normalisation for each dataset #########################
+datasets <- c("PRJNA694147","PRJNA886436", "PRJNA917642", "PRJNA1001307") 
+
+for (dataset in datasets) {
+  # create new directory for results
+  count_dir <- paste("Output/count_output_", dataset, sep="")
+  count_dir <- here(count_dir)
+  if (!(dir.exists(here(count_dir)))) {dir.create(here(count_dir))}
+  #set up all variables
+  dir <- here("Output", dataset)
+  data <- here("Data/", dataset)
+  ann_file <- list.files(path = dir, pattern = "\\d+.gff3$")
+  count_files <- list.files(path = count_dir, pattern = "Counts.csv$") 
+  #run count_feature function for all files in the output directory for each paired dataset 
+  for (file in ann_file) {
+    filename <- sub(".gff3", "", file)
+    count_features(bam_dir=data,
+                annotation_dir=dir,
+                annotation_file=file,
+                output_dir=count_dir,
+                chromosome_alias_file=here("chromosome.txt"),
+                strandedness="stranded",
+                is_paired_end=TRUE,
+                output_filename = sub(".gff3", "", file) )
+    cat(sprintf("Completed initial count features for dataset: %s \n", dataset))
+    #tpm normalisation
+    tpm_output <- paste(dir, "/", dataset, "_TPM.csv", sep="")
+    gff <-  paste(dir,ann_file, sep="/")
+    for (file in count_files) {
+      count_file <-here(count_dir,file)
+      tpm_normalisation(
+                count_table = count_file,
+                complete_ann = gff,
+                output_file = tpm_output,
+                feature_type = c("putative_sRNA", "putative_UTR")) 
+      cat(sprintf("Completed tpm_normalisation calculations for dataset: %s \n", dataset))
+      #tpm flagging
+      flag_output <- paste(dir, "/", dataset, "_flagged.gff3", sep="")
+      tpm_flagging(tpm_data= tpm_output, 
+              complete_annotation = paste(dir,ann_file, sep="/"), 
+              output_file= flag_output)
+      cat(sprintf("Completed tpm flagging for dataset: %s \n", dataset)) 
+    }
+  }
+}
+
+```
+
+
+Edit annotation file to eliminate low expression and overlapping predictions. Combine gff files into final combined gff
+
+Use new combined annotation file to re-count feature expression and make a single counts matrix for all samples for all transcripts.
+
+Make a counts matrix from combination of all counts from datasets.
+
+Combine annotations: filter for expression level and length, resolve sRNA,  and UTR overlaps, also overlaps with annotated ncRNAs
+
+
+```{r combine_annotations, eval=F}
+#combining (filtered) gff3 files with predicted sRNA/UTR annotations to get one master list
+
+# 1. Subset elements by ncRNAs (sRNA and UTR) and relevant expression filter
+# 2. make genomic ranges object for each dataset
+# 3. combine all ncRNAs together in one grange object
+# 4. reduce to simplified set of ncRNA coordinates
+# 5. map back to get names of ncRNAs? if combine sRNAs and UTRs, to identify which? 
+
+# import each .gff and subset by ncRNAs
+ref <- import.gff3(here("Genome", "GCA_000069185.gff3"))
+nc_gr <- ref[(elementMetadata(ref)[, "type"]=="ncRNA_gene")]
+
+g1 <- import.gff3(here("Output", "PRJNA694147", "PRJNA694147_flagged.gff3"))
+g2 <- import.gff3(here("Output","PRJNA886436","PRJNA886436_flagged.gff3") )
+g3 <- import.gff3(here("Output","PRJNA917642","PRJNA917642_flagged.gff3"))
+g4 <- import.gff3(here("Output","PRJNA1001307","PRJNA1001307_flagged.gff3"))
+
+#single end 
+g5 <- import.gff3(here("Output","PRJNA313774","PRJNA313774_flagged.gff3"))
+g6 <- import.gff3(here("Output","PRJNA295556","PRJNA295556_flagged.gff3"))
+
+srnas_gr1<-g1[elementMetadata(g1)[,"type"] %in% "putative_sRNA"]
+srnas_gr1<-srnas_gr1[which(width(srnas_gr1)<=1000),]
+srnas_gr1 <- srnas_gr1[elementMetadata(srnas_gr1)[,"expression_flag"] == "high_expression_hit"]
+utrs_gr1<-g1[elementMetadata(g1)[,"type"] %in% "putative_UTR"]
+utrs_gr1<-utrs_gr1[which(width(utrs_gr1)<=500),]
+utrs_gr1 <- utrs_gr1[elementMetadata(utrs_gr1)[,"expression_flag"] == "high_expression_hit"]
+
+srnas_gr2<-g2[elementMetadata(g2)[,"type"] %in% "putative_sRNA"]
+srnas_gr2<-srnas_gr2[which(width(srnas_gr2)<=1000),]
+srnas_gr2 <- srnas_gr2[elementMetadata(srnas_gr2)[,"expression_flag"] == "high_expression_hit"]
+utrs_gr2<-g2[elementMetadata(g2)[,"type"] %in% "putative_UTR"]
+utrs_gr2<-utrs_gr2[which(width(utrs_gr2)<=500),]
+utrs_gr2<- utrs_gr2[elementMetadata(utrs_gr2)[,"expression_flag"] == "high_expression_hit"]
+
+srnas_gr3<-g3[elementMetadata(g3)[,"type"] %in% "putative_sRNA"]
+srnas_gr3<-srnas_gr3[which(width(srnas_gr3)<=1000),]
+srnas_gr3 <- srnas_gr3[elementMetadata(srnas_gr3)[,"expression_flag"] == "high_expression_hit"]
+utrs_gr3<-g3[elementMetadata(g3)[,"type"] %in% "putative_UTR"]
+utrs_gr3<-utrs_gr3[which(width(utrs_gr3)<=500),]
+utrs_gr3<- utrs_gr3[elementMetadata(utrs_gr3)[,"expression_flag"] == "high_expression_hit"]
+
+srnas_gr4<-g4[elementMetadata(g4)[,"type"] %in% "putative_sRNA"]
+srnas_gr4<-srnas_gr4[which(width(srnas_gr4)<=1000),]
+srnas_gr4 <- srnas_gr4[elementMetadata(srnas_gr4)[,"expression_flag"] == "high_expression_hit"]
+utrs_gr4<-g4[elementMetadata(g4)[,"type"] %in% "putative_UTR"]
+utrs_gr4<-utrs_gr4[which(width(utrs_gr4)<=500),]
+utrs_gr4 <- utrs_gr4[elementMetadata(utrs_gr4)[,"expression_flag"] == "high_expression_hit"]
+
+srnas_gr5<-g5[elementMetadata(g5)[,"type"] %in% "putative_sRNA"]
+srnas_gr5<-srnas_gr5[which(width(srnas_gr5)<=1000),]
+srnas_gr5 <- srnas_gr5[elementMetadata(srnas_gr5)[,"expression_flag"] == "high_expression_hit"]
+utrs_gr5<-g5[elementMetadata(g5)[,"type"] %in% "putative_UTR"]
+utrs_gr5<-utrs_gr5[which(width(utrs_gr5)<=500),]
+utrs_gr5 <- utrs_gr5[elementMetadata(utrs_gr5)[,"expression_flag"] == "high_expression_hit"]
+
+srnas_gr6<-g6[elementMetadata(g6)[,"type"] %in% "putative_sRNA"]
+srnas_gr6<-srnas_gr6[which(width(srnas_gr6)<=1000),]
+srnas_gr6 <- srnas_gr6[elementMetadata(srnas_gr6)[,"expression_flag"] == "high_expression_hit"]
+utrs_gr6<-g6[elementMetadata(g6)[,"type"] %in% "putative_UTR"]
+utrs_gr6<-utrs_gr6[which(width(utrs_gr6)<=500),]
+utrs_gr6 <- utrs_gr6[elementMetadata(utrs_gr6)[,"expression_flag"] == "high_expression_hit"]
+
+total_srnas_gr<-c(srnas_gr1, srnas_gr2, srnas_gr3, srnas_gr4, srnas_gr5, srnas_gr6)
+#total_srnas_gr<-c(srnas_gr2, srnas_gr4, srnas_gr5, srnas_gr6)
+# reduce to align ranges and merge overlapping ranges, those with specified gap between 
+red_srnas_gr<-reduce(total_srnas_gr, min.gapwidth=5L)
+
+total_utrs_gr<-c(utrs_gr1, utrs_gr2, utrs_gr3, utrs_gr4, utrs_gr5, utrs_gr6)
+#total_utrs_gr<-c(utrs_gr2, utrs_gr4, utrs_gr5, utrs_gr6)
+red_utrs_gr<-reduce(total_utrs_gr, min.gapwidth=5L)
+
+# merge overlapping srnas and utrs to find srnas that overlap utr ranges
+ov <- mergeByOverlaps(red_srnas_gr, red_utrs_gr)
+# remove ranges in red_srnas_gr that are in ov
+red_srnas_gr <- red_srnas_gr[!red_srnas_gr %in% ov$red_srnas_gr]
+
+# merge overlapping srnas and annotated ncRNA to find srnas that overlap annotated ncRNA ranges
+ov_ann <- mergeByOverlaps(red_srnas_gr, nc_gr)
+red_srans_gr <- red_srnas_gr[!red_srnas_gr %in% ov_ann$red_srnas_gr]
+ov_ann <- mergeByOverlaps(red_utrs_gr, nc_gr)
+red_utrs_gr <- red_utrs_gr[!red_utrs_gr %in% ov_ann$red_utrs_gr]
+
+# subset by strand
+pos_srnas_gr<-subset(red_srnas_gr, strand=="+")
+neg_srnas_gr<-subset(red_srnas_gr, strand=="-")
+# this uses code from BH srna_calc and utr_calc to re-name the new elements 
+# (needed to add 'as.integer' to remove whitespace before coordinates)
+names(pos_srnas_gr) <- apply(as.data.frame(pos_srnas_gr), 1, function(x) paste("ID=putative_sRNA:p", as.integer(x[2]), "_", as.integer(x[3]), ";", sep = ""))
+names(neg_srnas_gr) <- apply(as.data.frame(neg_srnas_gr), 1, function(x) paste("ID=putative_sRNA:m", as.integer(x[2]), "_", as.integer(x[3]), ";", sep = ""))
+
+pos_utrs_gr<-subset(red_utrs_gr, strand=="+")
+neg_utrs_gr<-subset(red_utrs_gr, strand=="-")
+
+names(pos_utrs_gr) <- apply(as.data.frame(pos_utrs_gr),1, function(x) paste("ID=putative_UTR:p", as.integer(x[2]), "_", as.integer(x[3]), ";", sep = ""))
+names(neg_utrs_gr) <- apply(as.data.frame(neg_utrs_gr),1, function(x) paste("ID=putative_UTR:m", as.integer(x[2]), "_", as.integer(x[3]), ";", sep = ""))
+
+# add to major features with strand feature editor (BH function)
+
+# make 'major features file' for each strand (use major_features func from BH)
+pos_features<-major_features(here("Genome", "GCA_000069185.gff3"), ".", "+", "ncRNA")
+neg_features<-major_features(here("Genome", "GCA_000069185.gff3"), ".", "-", "ncRNA")
+
+# this should join utr and srna features together
+pos_strand<-strand_feature_editor(target_strand = "+", pos_srnas_gr, pos_utrs_gr, pos_features)
+neg_strand<-strand_feature_editor(target_strand = "-", neg_srnas_gr, neg_utrs_gr, neg_features)
+# use last step of ffe to create new file
+## Creating the final annotation dataframe by combining both strand dataframe and adding missing information like child features from the original GFF3 file.
+gff <- read.delim(here("Genome", "GCA_000069185.gff3"), header = FALSE, comment.char = "#")
+annotation_dataframe <- rbind(gff, pos_strand, neg_strand)
+## Remove all the repeating information.
+annotation_dataframe <- unique(annotation_dataframe)
+## Order the dataframe by feature start coordinates.
+annotation_dataframe <- annotation_dataframe[order(annotation_dataframe[,4]),]
+
+## Restore the original header.
+f <- readLines(here("Genome", "GCA_000069185.gff3"))
+header <- c()
+i <- 1
+while (grepl("#",f[i])==TRUE) {
+  f_line <- f[i]
+  header <- c(header,f_line)
+  i <- i+1
+}
+# add a line to indicate the origin of the file (single # commas should be ignored by programs)
+header <- c(header, "# produced by baerhunter")
+
+## Create the final GFF3 file. 
+output_file<-here("Output/comb_filtered.gff3")
+write.table(header, output_file, sep = "\t", quote = FALSE, row.names = FALSE, col.names = FALSE)
+write.table(annotation_dataframe, output_file, sep = "\t", quote = FALSE, row.names = FALSE, col.names = FALSE, append = TRUE)
+
+```
+
+Use new combined annotation file to re-count feature expression and make a single counts matrix for all samples for all transcripts.
+
+
+```{r recount_features, eval=F}
+
+# Read in list of datasets
+datasets <- c("PRJNA694147","PRJNA886436", "PRJNA1001307", "PRJNA917642") 
+
+for (dataset in datasets){
+        count_features(bam_dir=here("Data", dataset),
+                    annotation_dir= here("Output"),
+                    annotation_file="comb_filtered.gff3",
+                    output_dir=here("Output", dataset),
+                    chromosome_alias_file=here("chromosome.txt"),
+                    
+                    
+                    strandedness="stranded",
+                    is_paired_end=TRUE,
+                    output_filename = paste(dataset, "Combined", sep = "_")
+                    )
+}
+
+
+datasets <- c("PRJNA313774", "PRJNA295556")
+for (dataset in datasets){
+        count_features(bam_dir=here("Data", dataset),
+                    annotation_dir= here("Output"),
+                    annotation_file="comb_filtered.gff3",
+                    output_dir=here("Output", dataset),
+                    chromosome_alias_file=here("chromosome.txt"),
+                    strandedness="stranded",
+                    is_paired_end=FALSE,
+                    output_filename = paste(dataset, "Combined", sep = "_")
+                    )
+}
+
+```
+
+
+Make a counts matrix from combination of all counts from datasets.
+
+PRJNA694147(GSE165352): low=76, high=76
+PRJNA886436(GSE214640): low=377, high=377 
+PRJNA917642(GSE222081): low=127, high=127 
+PRJNA1001307(GSE239869): low=339, high=339
+
+
+```{r make_counts_matrix}
+# read in count files for dataset
+ount_dir <- paste("Output/count_output_", dataset, sep="")
+count_dir <- here(count_dir)
+set_a<-read.delim(here("Output/PRJNA694147/PRJNA694147_Combined_Counts.csv"), header=T)
+set_b<-read.delim(here("Output/PRJNA886436/PRJNA886436_Combined_Counts.csv"), header=T)
+set_c<-read.delim(here("Output/PRJNA917642/PRJNA917642_Combined_Counts.csv"), header=T)
+set_d<-read.delim(here("Output/PRJNA1001307/PRJNA1001307_Combined_Counts.csv"), header=T)
+#single
+set_e<-read.delim(here("Output/PRJNA313774/PRJNA313774_Combined_Counts.csv"), header=T)
+set_f<-read.delim(here("Output/PRJNA295556/PRJNA295556_Combined_Counts.csv"), header=T)
+
+
+# List of sets
+sets <- list(set_a, set_b, set_c, set_d, set_e, set_f)
+
+# Find common row names
+common_rows <- Reduce(intersect, lapply(sets, rownames))
+
+# Subset each set to common rows
+aligned_sets <- lapply(sets, function(df) df[common_rows, , drop = FALSE])
+
+# Column-bind the aligned sets
+countdata <- do.call(cbind, aligned_sets)
+
+#create a combined count matrix for all features 
+#countdata<-cbind(set_a, set_b, set_c, set_d, set_e, set_f)
+colnames(countdata)
+colnames(countdata) <- gsub("\\_sorted$","",colnames(countdata))
+#remove final_ from sample names
+colnames(countdata) <- gsub("^final_", "", colnames(countdata))
+#sort samples  
+countdata <- countdata[, order(names(countdata))]
+colnames(countdata)
+#inspection of matrix 
+head(countdata)
+tail(countdata)
+nrow(countdata)
+#7046
+length(countdata)
+
+#save count data as R object
+saveRDS(countdata, here("Output/count_matrix.RData"))
+#write table of count matrix (has gene names as row names)
+write.csv(countdata, here("Output/count_matrix.csv"), quote=F, row.names = T)
+```
+
+
+```{r create a DESeq dataset}
+# load count matrix
+countdata <- readRDS(here("Output/count_matrix.RData"))
+#change df to intigers but maintain rownames 
+rownames_df <- rownames(countdata)
+countdata <- data.frame(lapply(countdata, function(x) as.integer(as.character(x))))
+rownames(countdata) <- rownames_df
+
+control_conditions.df<-read.csv(here("Data/control_conditions_df.csv"))
+#this step defined control samples as the base reference 
+control_conditions.df$condition <- factor(control_conditions.df$condition)
+control_conditions.df$condition <- relevel(control_conditions.df$condition, "Control") 
+#if the metadata is somehow already ordered, this line unorders it 
+control_conditions.df$condition <- factor(control_conditions.df$condition, ordered = FALSE)
+#convert study to factor
+control_conditions.df$study <- factor(control_conditions.df$study)
+
+
+control_conditions.df <- control_conditions.df[order(control_conditions.df$sample), ]
+#check order is same for count data and conditions data
+all(control_conditions.df$sample == colnames(countdata))
+#save datafiles following modifications
+saveRDS(countdata, here("Output/count_matrix.RData"))
+write.csv(control_conditions.df, here("Data/control_conditions_df.csv"), quote=F, row.names = F)
+
+#construct deseq dataset
+dds_control<-DESeqDataSetFromMatrix(countData = countdata,
+                              colData = control_conditions.df,
+                              design = ~study+condition)
+# pre-filter reads to exclude rows with very low expression--makes more efficient
+keep <- rowSums(counts(dds_control)) >= 10
+dds_filtered <- dds_control[keep,]
+
+```
+
+
+## 5) Normalisation, transformation and batch correction
+
+Make DESeq dataset and check for low expression, Normalise for sequencing depth using DESeq2 normalisation
+
+Look at normalisation comparison with boxplots
+
+```{r normalisation_boxplot}
+
+
+
+#boxplot for normalised data (untransformed)
+#boxplot for original data 
+dds.untransformed <- assay(dds_filtered)
+colnames(dds.untransformed)<-colnames(dds_filtered)
+study_colors = c(rep("#1B9E77",14),rep("#D95F02",13),rep("#7570B3",17),rep("#E7298A",2), rep("#66A61E",12), rep("#E6AB02",8))
+
+par(mfrow=c(1,2))
+par(cex.axis=0.5) 
+par(mar=c(4,2,1,1))
+boxplot <- boxplot(dds.untransformed, 
+                        PchCex =0.01,
+                        axes=TRUE,
+                        las=2,
+                        col=study_colors, 
+                        ylim = c(0,1500),
+                        outline =TRUE,
+                        outcex=0.35,
+                        main="non_normalized data",
+                        cex.main = 1)
+
+
+
+########### sequencing depth normalisation ########################
+
+#calculate size factor
+dds_filtered<-estimateSizeFactors(dds_filtered)
+sizeFactors(dds_filtered)
+#normalised read counts
+counts_normalized<-counts(dds_filtered, normalized=TRUE)
+
+#boxplot for normalised data 
+par(cex.axis=0.5) 
+par(mar=c(4,2,1,1))
+norm_boxplot <- boxplot(counts_normalized, 
+                        PchCex =0.01,
+                        axes=TRUE,
+                        las=2,
+                        col=study_colors, 
+                        ylim = c(0,300),
+                        outline =TRUE,
+                        outcex=0.35,
+                        main="deseq normalized, no transformation",
+                        cex.main = 1)
+legend("topright", legend=c( "PRJNA886436", "PRJNA917642", "PRJNA295556", "PRJNA1001307","PRJNA313774"), 
+               col = c("#1B9E77","#D95F02","#7570B3","#E7298A", "#66A61E","#E6AB02"), 
+               fill = c("#1B9E77","#D95F02","#7570B3","#E7298A", "#66A61E","#E6AB02"),
+               cex = 0.75, 
+               pt.cex = 1)
+
+```
+
+
+Test log2 transformation for comparison
+
+
+```{r log2_transformation}
+#The argument normalized equals true, divides each column by its size factor.
+# with FALSE non-normalised
+# pseudocount of 1
+logcounts <- log2(counts(dds_filtered, normalized=FALSE) + 1 )
+
+#boxplot for log-normalised data 
+par(mfrow=c(1,2))
+par(cex.axis=0.5) 
+par(mar=c(4,5,1,1))
+study_colors = c(rep("#1B9E77",14),rep("#D95F02",13),rep("#7570B3",17),rep("#E7298A",2), rep("#66A61E",12), rep("#E6AB02",8))
+log_boxplot <- boxplot(logcounts, 
+                        PchCex =0.01,
+                        axes=TRUE,
+                        #ylab=c("log2 normalized counts"),
+                        las=2,
+                        col=study_colors, 
+                        outline =TRUE,
+                        outcex=0.35,
+                        main="log2 normalized")
+
+# use raw count data, not normalised for sequencing depth
+
+# rlog blind=T
+rlog_control<-rlog(dds_filtered)
+# assay() creates summarized experiment ('se') which is matrix where rows are genetic features and columns are samples
+rlog_control_se<-assay(rlog_control)
+
+study_colors = c(rep("#1B9E77",14),rep("#D95F02",13),rep("#7570B3",17),rep("#E7298A",2), rep("#66A61E",12), rep("#E6AB02",8))
+
+#boxplot for transformed data 
+par(cex.axis=0.5) 
+par(mar=c(4,4,1,1))
+rlog_boxplot <- boxplot(rlog_control_se, 
+                        PchCex =0.01,
+                        axes=TRUE,
+                        las=2,
+                        col=study_colors, 
+                        ylim = c(0,30),
+                        outline =TRUE,
+                        outcex=0.35,
+                        main="rlog normalised")
+legend("topright", legend=c("PRJNA694147", "PRJNA886436", "PRJNA917642", "PRJNA295556", "PRJNA1001307","PRJNA313774"), 
+               col = c("#1B9E77","#D95F02","#7570B3","#E7298A", "#66A61E","#E6AB02"), 
+               fill = c("#1B9E77","#D95F02","#7570B3","#E7298A", "#66A61E","#E6AB02"),
+               cex = 0.75, 
+               pt.cex = 1)
+
+```
+
+Rlog transformation
+
+
+```{r rlog_transf_control, message=FALSE}
+#cds only
+
+cds_counts <- subset(rlog_control, grepl("gene:", rownames(rlog_control)))
+cds_counts_se <- assay(cds_counts)
+
+par(mfrow=c(2,2))
+par(cex.axis=0.5) 
+par(mar=c(4,2,1,1))
+rlog_cds_boxplot <- boxplot(cds_counts_se, 
+                        PchCex =0.01,
+                        axes=TRUE,
+                        las=2,
+                        col=study_colors, 
+                        ylim = c(0,30),
+                        outline =TRUE,
+                        outcex=0.35,
+                        main="rlog normalised: CDS only")
+
+#srna only
+srna_counts <- subset(rlog_control, grepl("putative_sRNA:", rownames(rlog_control)))
+srna_counts_se <- assay(srna_counts)
+
+par(cex.axis=0.5) 
+par(mar=c(4,2,1,1))
+rlog_srna_boxplot <- boxplot(srna_counts_se, 
+                        PchCex =0.01,
+                        axes=TRUE,
+                        las=2,
+                        col=study_colors, 
+                        ylim = c(0,30),
+                        outline =TRUE,
+                        outcex=0.35,
+                        main="rlog normalised: Putatve sRNA only")
+
+#utr only
+utr_counts <- subset(rlog_control, grepl("putative_UTR:", rownames(rlog_control)))
+utr_counts_se <- assay(utr_counts)
+
+par(cex.axis=0.5) 
+par(mar=c(4,2,1,1))
+rlog_utr_boxplot <- boxplot(utr_counts_se, 
+                        PchCex =0.01,
+                        axes=TRUE,
+                        las=2,
+                        col=study_colors, 
+                        ylim = c(0,30),
+                        outline =TRUE,
+                        outcex=0.35,
+                        main="rlog normalised: Putative UTR only")
+
+plot.new()
+legend("center", legend=c("PRJNA694147", "PRJNA886436", "PRJNA917642", "PRJNA295556", "PRJNA1001307","PRJNA313774"), 
+               col = c("#1B9E77","#D95F02","#7570B3","#E7298A", "#66A61E","#E6AB02"), 
+               fill = c("#1B9E77","#D95F02","#7570B3","#E7298A", "#66A61E","#E6AB02"),
+               cex = 1.29, 
+               pt.cex = 2)
+
+```
+
+
+Used limma to control batch effect
+
+PCA for non transformed data 
+
+```{r pca_limma_rlogc}
+
+# make PCA plot for limma batch corrected control set (limma_rlogc)
+
+# load count matrix and conditions df
+conditions<-read.csv(here("Data/control_conditions_df.csv"))
+
+
+
+#establishing a custom viridis colour palette
+toned_down_pal <-  c("#66A61E","#E7298A","#E6AB02","#1B9E77","#D95F02","#7570B3")
+# load count matrix
+
+countdata <- readRDS(here("Output/count_matrix.RData"))
+
+colnames(countdata)
+conditions$condition
+
+# assay() creates summarized experiment ('se') which is matrix where rows are genetic features and columns are samples
+control_se<-assay(dds_filtered)
+#generating PCA table 
+
+PCA.data.plot <- prcomp(t(dds.untransformed))
+countdata_df <- as.data.frame(PCA.data.plot$x)
+countdata_df$condition<- conditions$condition
+countdata_df$dataset <- conditions$study
+
+summary(countdata_df)
+
+
+#PCA plot for original data
+original <- ggplot(countdata_df, aes(x=PC1,y=PC2,color=dataset,shape=condition)) +
+        scale_shape_manual(values = 0:21) + 
+        geom_point(size=3) + 
+        ggtitle("untransformed")+
+        #xlab("PC1 (33%)") + 
+        #ylab("PC2 (24%)") +
+        scale_color_manual(values = toned_down_pal) + 
+        theme_bw()
+
+
+# can see clustering of datasets
+
+PCA.data.plot <- prcomp(t(rlog_control_se))
+rlog_countdata_df <- as.data.frame(PCA.data.plot$x)
+rlog_countdata_df$condition<- conditions$condition
+rlog_countdata_df$dataset <- conditions$study
+
+rlog_transformed <- ggplot(rlog_countdata_df,aes(x=PC1,y=PC2,color=dataset,shape=condition)) +
+        scale_shape_manual(values = 0:21) + 
+        geom_point(size=3) + 
+        #xlab("PC2 (24%)") + 
+        #ylab("PC3 (11%)") +
+        ggtitle("rlog")+
+        scale_color_manual(values = toned_down_pal) + 
+        theme_bw()
+
+
+combined_plot <- (original | rlog_transformed) +
+                 plot_layout(guides = "collect", heights = c(1.5)) &
+                 theme(legend.position = "right",
+                       legend.text = element_text(size = 7),
+                       legend.title = element_blank())
+combined_plot
+
+```
+
+
+```{r limma_batchcorr_controls}
+
+
+#batch effect correction using limma; requirement to define batch effect 
+# read in conditions/sample
+conditions<-read.csv(here("Data/control_conditions_df.csv"))
+
+# uses log-expression values for series of samples, and needs design matrix
+limma_rlogc<-removeBatchEffect(x=rlog_control_se,
+                                  batch=conditions$study,
+                                  group=conditions$condition)
+
+
+saveRDS(limma_rlogc, file=here("Output/limma_rlogc.RData"))
+
+
+#batch effect correction using limma; requirement to define batch effect 
+
+# uses log-expression values for series of samples, and needs design matrix
+limma_untransformed<-removeBatchEffect(x=dds.untransformed,
+                                  batch=conditions$study) 
+
+
+saveRDS(limma_untransformed, file=here("Output/limma_untransformed.RData"))
+
+```
+PCA plots for batch corrected rlog transfomrmed data
+
+```{r}
+
+
+PCA.data.plot <- prcomp(t(limma_rlogc))
+pca_rlogc_limma_df <- as.data.frame(PCA.data.plot$x)
+pca_rlogc_limma_df$condition<- conditions$condition
+pca_rlogc_limma_df$dataset <- conditions$study
+
+summary(pca_rlogc_limma_df)
+
+#PC 3 and 4
+limma_rlogc_plot <- ggplot(pca_rlogc_limma_df, aes(x=PC1,y=PC2,color=dataset,shape=condition)) +
+        scale_shape_manual(values = 0:21) + 
+        geom_point(size=3) + 
+        #xlab("PC3 (11%)") + 
+        #ylab("PC4 (7%)") + 
+        scale_color_manual(values = toned_down_pal) + 
+        theme_bw()
+
+
+limma_rlogc_plot34 <- ggplot(pca_rlogc_limma_df, aes(x=PC3,y=PC4,color=dataset,shape=condition)) +
+        scale_shape_manual(values = 0:21) + 
+        geom_point(size=3) + 
+        #xlab("PC3 (11%)") + 
+        #ylab("PC4 (7%)") + 
+        scale_color_manual(values = toned_down_pal) + 
+        theme_bw()
+
+
+limma_rlogc_plot56 <- ggplot(pca_rlogc_limma_df, aes(x=PC5,y=PC6,color=dataset,shape=condition)) +
+        scale_shape_manual(values = 0:21) + 
+        geom_point(size=3) + 
+        #xlab("PC3 (11%)") + 
+        #ylab("PC4 (7%)") + 
+        scale_color_manual(values = toned_down_pal) + 
+        theme_bw()
+
+
+limma_rlogc_plot78 <- ggplot(pca_rlogc_limma_df, aes(x=PC7,y=PC8,color=dataset,shape=condition)) +
+        scale_shape_manual(values = 0:21) + 
+        geom_point(size=3) + 
+        #xlab("PC3 (11%)") + 
+        #ylab("PC4 (7%)") + 
+        scale_color_manual(values = toned_down_pal) + 
+        theme_bw()
+
+
+combined_plot <- (limma_rlogc_plot | limma_rlogc_plot34) /
+                 (limma_rlogc_plot56 | limma_rlogc_plot78) +
+                 plot_annotation(title = "Batch corrected PCA plots") +
+                 plot_layout(guides = "collect") &
+                 theme(legend.position = "right",
+                       legend.text = element_text(size = 7),
+                       legend.title = element_blank())
+combined_plot
+
+```
+
+
+Compare with and without batch correction with Limma using hierarchical dendrograms
+
+
+Make hierarchical dendrogram without batch correction:
+
+
+```{r dendro_no_batch}
+
+sample_cond <- read_csv(here("Data/control_conditions_df.csv"), col_names=T)
+
+# Create color mapping for each study
+study_levels <- unique(sample_cond$study)
+cols <- c("#66A61E", "#E7298A", "#E6AB02", "#1B9E77", "#D95F02", "#7570B3")
+names(cols) <- study_levels
+# Assign colors to samples based on their study
+sample_colors <- cols[sample_cond$study]
+
+# Create dendrogram
+hc_logc <- hclust(dist(t(rlog_control_se)),method="ward")
+dend_logc <- as.dendrogram(hc_logc)
+
+# Get sample labels from dendrogram
+dend_labels <- labels(dend_logc)
+
+# Reorder sample_cond to match dendrogram order
+ordered_cond <- sample_cond[match(dend_labels, sample_cond$sample), ]
+
+# Extract reordered colors and conditions
+ordered_colors <- cols[ordered_cond$study]
+ordered_labels <- ordered_cond$condition
+
+# Apply labels and colors to dendrogram
+dend_colored <- dend_logc %>%
+  set("labels_colors", ordered_colors) %>%
+  set("labels_cex", 0.8) %>%
+  set("labels", ordered_labels)
+
+# Plot dendrogram
+sizeGrWindow(25, 4)
+par(cex = 0.8, mar = c(6, 6, 5, 2))
+plot(dend_colored, main = "Dendrogram rlog transformed")
+
+# Add legend with correct color-study mapping
+legend("topright",
+       legend = names(cols),
+       fill = cols,
+       cex = 1.2,
+       pt.cex = 2)
+#add rectangles around each cluster 
+#14 clusters as there are 14 conditions 
+rect.hclust(hc_logc, k=14)
+
+```
+
+```{r dendrogram_limma_controls, echo=TRUE}
+
+#dendrogram for rlog transformed data with batch correction
+
+limma_rlogc <- readRDS(file=here("Output/limma_rlogc.RData"))
+sample_cond <- read_csv(here("Data/control_conditions_df.csv"), col_names=T)
+
+# Create color mapping for each study
+study_levels <- unique(sample_cond$study)
+cols <- c("#66A61E", "#E7298A", "#E6AB02", "#1B9E77", "#D95F02", "#7570B3")
+names(cols) <- study_levels
+# Assign colors to samples based on their study
+sample_colors <- cols[sample_cond$study]
+
+# Create dendrogram
+hc_logc <- hclust(dist(t(limma_rlogc)), method = "ward")
+dend_logc <- as.dendrogram(hc_logc)
+
+# Get sample labels from dendrogram
+dend_labels <- labels(dend_logc)
+
+# Reorder sample_cond to match dendrogram order
+ordered_cond <- sample_cond[match(dend_labels, sample_cond$sample), ]
+
+# Extract reordered colors and conditions
+ordered_colors <- cols[ordered_cond$study]
+ordered_labels <- ordered_cond$condition
+
+# Apply labels and colors to dendrogram
+dend_colored <- dend_logc %>%
+  set("labels_colors", ordered_colors) %>%
+  set("labels_cex", 0.8) %>%
+  set("labels", ordered_labels)
+
+# Plot dendrogram
+sizeGrWindow(25, 4)
+par(cex = 0.8, mar = c(6, 6, 5, 2))
+plot(dend_colored, main = "Dendrogram rlog transformed and batch corrected")
+
+# Add legend with correct color-study mapping
+legend("topright",
+       legend = names(cols),
+       fill = cols,
+       cex = 1.2,
+       pt.cex = 2)
+
+```
+
+
+## 6) Alternative approach - Deseq2 anlysis on per dataset basis rather than combined
+
+```{r}
+# import each .gff and subset by ncRNAs
+ref <- import.gff3(here("Genome", "GCA_000069185.gff3"))
+nc_gr <- ref[(elementMetadata(ref)[, "type"]=="ncRNA_gene")]
+
+
+for (dataset in datasets) {
+  g <- import.gff3(here("Output", dataset, paste(dataset, "flagged.gff3", sep = "_")))
+  srnas_gr<-g[elementMetadata(g)[,"type"] %in% "putative_sRNA"]
+  srnas_gr<-srnas_gr[which(width(srnas_gr)<=1000),]
+  srnas_gr <- srnas_gr[elementMetadata(srnas_gr)[,"expression_flag"] == "high_expression_hit"]
+  utrs_gr<-g1[elementMetadata(g)[,"type"] %in% "putative_UTR"]
+  utrs_gr<-utrs_gr[which(width(utrs_gr)<=500),]
+  utrs_gr <- utrs_gr[elementMetadata(utrs_gr)[,"expression_flag"] == "high_expression_hit"]
+    # reduce to align ranges and merge overlapping ranges, those with specified gap between 
+  red_srnas_gr<-reduce(srnas_gr, min.gapwidth=5L)
+  
+  red_utrs_gr<-reduce(utrs_gr, min.gapwidth=5L)
+  
+  # merge overlapping srnas and utrs to find srnas that overlap utr ranges
+  ov <- mergeByOverlaps(red_srnas_gr, red_utrs_gr)
+  # remove ranges in red_srnas_gr that are in ov
+  red_srnas_gr <- red_srnas_gr[!red_srnas_gr %in% ov$red_srnas_gr]
+  
+  # merge overlapping srnas and annotated ncRNA to find srnas that overlap annotated ncRNA ranges
+  ov_ann <- mergeByOverlaps(red_srnas_gr, nc_gr)
+  red_srans_gr <- red_srnas_gr[!red_srnas_gr %in% ov_ann$red_srnas_gr]
+  ov_ann <- mergeByOverlaps(red_utrs_gr, nc_gr)
+  red_utrs_gr <- red_utrs_gr[!red_utrs_gr %in% ov_ann$red_utrs_gr]
+  
+  # subset by strand
+  pos_srnas_gr<-subset(red_srnas_gr, strand=="+")
+  neg_srnas_gr<-subset(red_srnas_gr, strand=="-")
+  # this uses code from BH srna_calc and utr_calc to re-name the new elements 
+  # (needed to add 'as.integer' to remove whitespace before coordinates)
+  names(pos_srnas_gr) <- apply(as.data.frame(pos_srnas_gr), 1, function(x) paste("ID=putative_sRNA:p", as.integer(x[2]), "_", as.integer(x[3]), ";", sep = ""))
+  names(neg_srnas_gr) <- apply(as.data.frame(neg_srnas_gr), 1, function(x) paste("ID=putative_sRNA:m", as.integer(x[2]), "_", as.integer(x[3]), ";", sep = ""))
+  
+  pos_utrs_gr<-subset(red_utrs_gr, strand=="+")
+  neg_utrs_gr<-subset(red_utrs_gr, strand=="-")
+  
+  names(pos_utrs_gr) <- apply(as.data.frame(pos_utrs_gr),1, function(x) paste("ID=putative_UTR:p", as.integer(x[2]), "_", as.integer(x[3]), ";", sep = ""))
+  names(neg_utrs_gr) <- apply(as.data.frame(neg_utrs_gr),1, function(x) paste("ID=putative_UTR:m", as.integer(x[2]), "_", as.integer(x[3]), ";", sep = ""))
+  
+  # add to major features with strand feature editor (BH function)
+  
+  # make 'major features file' for each strand (use major_features func from BH)
+  pos_features<-major_features(here("Genome", "GCA_000069185.gff3"), ".", "+", "ncRNA")
+  neg_features<-major_features(here("Genome", "GCA_000069185.gff3"), ".", "-", "ncRNA")
+  
+  # this should join utr and srna features together
+  pos_strand<-strand_feature_editor(target_strand = "+", pos_srnas_gr, pos_utrs_gr, pos_features)
+  neg_strand<-strand_feature_editor(target_strand = "-", neg_srnas_gr, neg_utrs_gr, neg_features)
+  # use last step of ffe to create new file
+  ## Creating the final annotation dataframe by combining both strand dataframe and adding missing information like child features from the original GFF3 file.
+  gff <- read.delim(here("Genome", "GCA_000069185.gff3"), header = FALSE, comment.char = "#")
+  annotation_dataframe <- rbind(gff, pos_strand, neg_strand)
+  ## Remove all the repeating information.
+  annotation_dataframe <- unique(annotation_dataframe)
+  ## Order the dataframe by feature start coordinates.
+  annotation_dataframe <- annotation_dataframe[order(annotation_dataframe[,4]),]
+  
+  ## Restore the original header.
+  f <- readLines(here("Genome", "GCA_000069185.gff3"))
+  header <- c()
+  i <- 1
+  while (grepl("#",f[i])==TRUE) {
+    f_line <- f[i]
+    header <- c(header,f_line)
+    i <- i+1
+  }
+  # add a line to indicate the origin of the file (single # commas should be ignored by programs)
+  header <- c(header, "# produced by baerhunter")
+  
+  ## Create the final GFF3 file. 
+  output_file<-here("Output", dataset, paste(dataset, "filtered.gff3"))
+  write.table(header, output_file, sep = "\t", quote = FALSE, row.names = FALSE, col.names = FALSE)
+  write.table(annotation_dataframe, output_file, sep = "\t", quote = FALSE, row.names = FALSE, col.names = FALSE, append = TRUE)
+  
+}
+
+```
+
+
+count reads against a filtered annotation file 
+```{r}
+
+#datasets <- c("PRJNA694147","PRJNA886436", "PRJNA917642", "PRJNA1001307") 
+datasets <- c("PRJNA917642") 
+for (dataset in datasets){ 
+  print(dataset)
+  count_features(bam_dir=here("Data", dataset),
+              annotation_dir= here("Output", dataset),
+              annotation_file=paste(dataset, "filtered.gff3", sep = "_"),
+              output_dir=here("Output", dataset),
+              chromosome_alias_file=here("chromosome.txt"),
+              strandedness="stranded",
+              is_paired_end=TRUE,
+              output_filename = paste(dataset, "filtered", sep = "_")
+              )
+}
+
+#datasets <- c("PRJNA295556","PRJNA313774")
+datasets <- c("PRJNA313774") 
+for (dataset in datasets){
+  print(dataset)
+  count_features(bam_dir=here("Data", dataset),
+              annotation_dir= here("Output", dataset),
+              annotation_file=paste(dataset, "filtered.gff3", sep = "_"),
+              output_dir=here("Output", dataset),
+              chromosome_alias_file=here("chromosome.txt"),
+              strandedness="stranded",
+              is_paired_end=FALSE,
+              output_filename = paste(dataset, "filtered", sep = "_")
+              )
+}
+
+```
+
+create a count matrix and metadata for rlog transformation and PCA plot 
+```{r}
+#dataset 556 has no conditions other than control so can not be compared 
+#datasets <- c("PRJNA694147", "PRJNA886436", "PRJNA917642", "PRJNA1001307", "PRJNA313774")
+datasets <- c("PRJNA917642")
+
+for (dataset in datasets) {
+  print(dataset)
+  conditions_name <- paste(dataset, "conditions.csv", sep = "_")
+  count_name <- paste(dataset, "filtered_Counts.csv", sep="_")
+  # load count matrix
+  countdata <- read.delim(here("Output", dataset, count_name))
+  #rename to only filename 
+  colnames(countdata) <- gsub("\\_sorted$","",colnames(countdata))
+  #remove final_ from sample names
+  colnames(countdata) <- gsub("^final_", "", colnames(countdata))
+  #sort samples
+  countdata <- countdata[, order(names(countdata))]
+    #change df to intigers but maintain rownames 
+  rownames_df <- rownames(countdata)
+  countdata <- data.frame(lapply(countdata, function(x) as.integer(as.character(x))))
+  rownames(countdata) <- rownames_df
+
+  control_conditions.df<-read.csv(here("Data", conditions_name))
+  #this step defined control samples as the base reference 
+  control_conditions.df$condition <- factor(control_conditions.df$condition)
+  control_conditions.df$condition <- relevel(control_conditions.df$condition, "Control") 
+  #if the metadata is somehow already ordered, this line unorders it 
+  control_conditions.df$condition <- factor(control_conditions.df$condition, ordered = FALSE)
+  #convert study to factor
+  control_conditions.df$study <- factor(control_conditions.df$study)
+  
+  
+  control_conditions.df <- control_conditions.df[order(control_conditions.df$sample), ]
+  #check order is same for count data and conditions data
+  all(control_conditions.df$sample == colnames(countdata))
+
+  #construct deseq dataset
+  dds_name <- paste("dds", dataset, sep="_")
+  dds_name <- DESeqDataSetFromMatrix(countData = as.matrix(countdata),
+                                colData = control_conditions.df,
+                                design = ~condition)
+  # pre-filter reads to exclude rows with very low expression--makes more efficient
+  dds_filtered <- paste(dataset, "dds_filtered", sep ="_")
+  keep <- rowSums(counts(dds_name)) >= 10
+  dds_filtered <- dds_name[keep,]
+  dds <- assay(dds_filtered)
+  
+  PCA.data.plot <- prcomp(t(dds))
+  pca_rlogc <- as.data.frame(PCA.data.plot$x)
+  pca_rlogc$condition<- control_conditions.df$condition
+  
+  summary(pca_rlogc)
+  
+  #create PCA plot
+  rlogc_plot <- ggplot(pca_rlogc, aes(x=PC1,y=PC2,color=condition)) +
+          geom_point(size=3) + 
+          ggtitle(paste(dataset, "PCA for normalised counts"))+
+          theme_bw()
+  rlogc_plot
+  plot_name <- paste(dataset, "normalised_PCA.png", sep="_")
+  ggsave(here("Results", plot_name), plot = rlogc_plot, width = 8, height = 6, dpi = 1000)
+}
+
+```
+
+Differential analysis
+
+
+```{r differential_expression}
+# load count matrix
+#datasets <- c("PRJNA694147", "PRJNA886436", "PRJNA917642", "PRJNA1001307", "PRJNA313774", "PRJNA295556")
+datasets <- c("PRJNA917642")
+for (dataset in datasets) {
+  count_name <- paste(dataset, "filtered_Counts.csv", sep="_")
+  count_file <- read.delim(here("Output", dataset, count_name), row.names = 1)
+  #rename to only filename 
+  colnames(count_file) <- gsub("\\_sorted$","",colnames(count_file))
+  #remove final_ from sample names
+  colnames(count_file) <- gsub("^final_", "", colnames(count_file))
+  #sort samples
+  count_file <- count_file[, order(names(count_file))]
+  mat <- as.matrix(count_file)
+  #set up metadata file 
+  conditions_name <- paste(dataset, "conditions.csv", sep = "_")
+  control<-read.csv(here("Data", conditions_name))
+  #this step defined control samples as the base reference 
+  control$condition <- factor(control$condition)
+  control$condition <- relevel(control$condition, "Control") 
+  control <- control[order(control$sample), ]
+
+  #Call differential_expression() function
+  DESeq_data <- DESeqDataSetFromMatrix(countData = round(mat), colData = control,design= ~condition)
+  # Perform DESeq2 analysis.
+  DESeq_data <- DESeq(DESeq_data)
+  conditions <- resultsNames(DESeq_data)
+  #remove intercept as condition 
+  conditions <- conditions[-1]
+  for (condition in conditions){
+    DESeq_results <- results(DESeq_data, name=condition)
+    print(summary(DESeq_results))
+    #order by p value 
+    resOrdered <- DESeq_results[order(DESeq_results$padj),]
+    print(resOrdered)
+    #show deregulated genes
+    resOrdered[grep('gene', rownames(resOrdered)),]
+    #show differentially expressed putative
+    putative <- resOrdered[grep('putative', rownames(resOrdered)),]
+    print(putative)
+  
+    res_df <- as.data.frame(DESeq_results)
+    res_df$log2FoldChange[is.na(res_df$log2FoldChange)] <- 0
+    res_df$padj[is.na(res_df$padj)] <- 1 # Assign non-significant values
+    #Thresholds for up/down-regulated genes
+    pval_threshold <- 0.05
+    log2FC_threshold <- 2
+    res_df$significance <- ifelse(res_df$padj < pval_threshold & res_df$log2FoldChange > log2FC_threshold, "Upregulated", ifelse(res_df$padj < pval_threshold & res_df$log2FoldChange < -log2FC_threshold, "Downregulated", "Not Significant"))
+    significant <- res_df[res_df$significance != "Not Significant",]
+    print(significant)
+    df_name <- paste(dataset, condition, "DEG.csv", sep = "_")
+    write.csv(significant, here("Results", df_name), row.names = T)
+    plot_name <- paste(dataset, condition, "plot.png", sep="_")
+    name <- sub("condition_", "", condition)
+    name <- sub("_vs_Control", "", name)
+    print(name)
+    main <- paste(dataset, name, "DEG", sep = " ")
+    volcano_plot <- EnhancedVolcano(DESeq_results,
+      lab = rownames(res_df),
+      x = "log2FoldChange",
+      y = "padj",
+      title = main,
+      xlab = bquote(~Log[2]~Fold~Change),
+      ylab = bquote(~-Log[10]~P~Value),
+      pCutoff = 0.05,
+      FCcutoff = 2,
+      col = c("grey30", "forestgreen", "royalblue", "red2"),
+      legendPosition = "top",
+      labSize = 3.0)
+    ggsave(here("Results", plot_name), plot = volcano_plot, width = 8, height = 6, dpi = 300)
+    plot_name <- paste(dataset, condition, "putative_plot.png", sep="_")
+    volcano_plot <- EnhancedVolcano(putative,
+      lab = rownames(putative),
+      x = "log2FoldChange",
+      y = "padj",
+      title = main,
+      xlab = bquote(~Log[2]~Fold~Change),
+      ylab = bquote(~-Log[10]~P~Value),
+      pCutoff = 0.05,
+      FCcutoff = 2,
+      col = c("grey30", "forestgreen", "royalblue", "red2"),
+      legendPosition = "top",
+      labSize = 3.0)
+   ggsave(here("Results", plot_name), plot = volcano_plot, width = 8, height = 6, dpi = 300)
+   volcano_plot
+  }
+}
+
+```
+
+## 7) Read counts against original annotation to check if ncRNAs result in issues with batch correction 
+
+```{r count_features, eval=F}
+
+# Read in list of datasets
+datasets <- c("PRJNA694147","PRJNA886436", "PRJNA1001307", "PRJNA917642") 
+datasets <- c("PRJNA917642") 
+for (dataset in datasets){
+    count_dir <- paste("Output/count_output_", dataset, sep="")
+    count_features(bam_dir=here("Data", dataset),
+                annotation_dir= here("Genome"),
+                annotation_file="GCA_000069185.gff3",
+                output_dir=here(count_dir),
+                chromosome_alias_file=here("chromosome.txt"),
+                strandedness="stranded",
+                is_paired_end=TRUE,
+                output_filename = paste(dataset, "original", sep = "_")
+                    )
+}
+
+
+datasets <- c("PRJNA313774", "PRJNA295556")
+for (dataset in datasets){
+    count_dir <- paste("Output/count_output_", dataset, sep="")
+    count_features(bam_dir=here("Data", dataset),
+                annotation_dir= here("Genome/"),
+                annotation_file="GCA_000069185.gff3",
+                output_dir=here(count_dir),
+                chromosome_alias_file=here("chromosome.txt"),
+                strandedness="stranded",
+                is_paired_end=FALSE,
+                output_filename = paste(dataset, "original", sep = "_")
+                    )
+}
+
+```
+Create a combined count file for original counts only 
+
+```{r make_counts_matrix}
+# read in count files for dataset
+set_a<-read.delim(here("Output/count_output_PRJNA694147/PRJNA694147_original_Counts.csv"), header=T)
+set_b<-read.delim(here("Output/count_output_PRJNA886436/PRJNA886436_original_Counts.csv"), header=T)
+#set_c<-read.delim(here("Output/count_output_PRJNA917642/PRJNA917642_original_Counts.csv"), header=T)
+set_d<-read.delim(here("Output/count_output_PRJNA1001307/PRJNA1001307_original_Counts.csv"), header=T)
+#single
+set_e<-read.delim(here("Output/count_output_PRJNA313774/PRJNA313774_original_Counts.csv"), header=T)
+set_f<-read.delim(here("Output/count_output_PRJNA295556/PRJNA295556_original_Counts.csv"), header=T)
+
+
+# List of sets
+sets <- list(set_a, set_b, set_c, set_d, set_e, set_f)
+
+# Find common row names
+common_rows <- Reduce(intersect, lapply(sets, rownames))
+
+# Subset each set to common rows
+aligned_sets <- lapply(sets, function(df) df[common_rows, , drop = FALSE])
+
+# Column-bind the aligned sets
+countdata <- do.call(cbind, aligned_sets)
+
+#create a combined count matrix for all features 
+#countdata<-cbind(set_a, set_b, set_c, set_d, set_e, set_f)
+colnames(countdata)
+colnames(countdata) <- gsub("\\_sorted$","",colnames(countdata))
+#remove final_ from sample names
+colnames(countdata) <- gsub("^final_", "", colnames(countdata))
+#sort samples  
+countdata <- countdata[, order(names(countdata))]
+colnames(countdata)
+
+#inspection of count matrix 
+head(countdata)
+tail(countdata)
+nrow(countdata)
+length(countdata)
+
+#save count data as R object
+saveRDS(countdata, here("Output/original_count_matrix.RData"))
+#write table of count matrix (has gene names as row names)
+write.csv(countdata, here("Output/original_count_matrix.csv"), quote=F, row.names = T)
+```
+
+
+```{r create DESeq data set}
+# load count matrix
+countdata <- readRDS(here("Output/original_count_matrix.RData"))
+#change df to intigers but maintain rownames 
+rownames_df <- rownames(countdata)
+countdata <- data.frame(lapply(countdata, function(x) as.integer(as.character(x))))
+rownames(countdata) <- rownames_df
+
+control_conditions.df<-read.csv(here("Data/original_control_conditions_df.csv"))
+#this step defined control samples as the base reference 
+control_conditions.df$condition <- factor(control_conditions.df$condition)
+control_conditions.df$condition <- relevel(control_conditions.df$condition, "Control") 
+#if the metadata is somehow already ordered, this line unorders it 
+control_conditions.df$condition <- factor(control_conditions.df$condition, ordered = FALSE)
+#convert study to factor
+control_conditions.df$study <- factor(control_conditions.df$study)
+
+
+control_conditions.df <- control_conditions.df[order(control_conditions.df$sample), ]
+#check order is same for count data and conditions data
+all(control_conditions.df$sample == colnames(countdata))
+#save datafiles following modifications
+saveRDS(countdata, here("Output/original_count_matrix.RData"))
+write.csv(control_conditions.df, here("Data/original_control_conditions_df.csv"), quote=F, row.names = F)
+
+#construct deseq dataset
+dds_control<-DESeqDataSetFromMatrix(countData = countdata,
+                              colData = control_conditions.df,
+                              design = ~study+condition)
+# pre-filter reads to exclude rows with very low expression--makes more efficient
+keep <- rowSums(counts(dds_control)) >= 10
+dds_filtered <- dds_control[keep,]
+
+```
+
+```{r transform and normalise}
+#untransformed counts 
+dds.untransformed <- assay(dds_filtered)
+
+#size factor normalised
+#calculate size factor
+dds_filtered<-estimateSizeFactors(dds_filtered)
+sizeFactors(dds_filtered)
+#normalised read counts
+counts_normalized<-counts(dds_filtered, normalized=TRUE)
+
+#log2 transformed
+logcounts <- log2(counts(dds_filtered, normalized=FALSE) + 1 )
+#rlog transformed
+# rlog blind=T
+rlog_control<-rlog(dds_filtered)
+# assay() creates summarized experiment ('se') which is matrix where rows are genetic features and columns are samples
+rlog_control_se<-assay(rlog_control)
+
+# carry out batch correction 
+conditions<-read.csv(here("Data/original_control_conditions_df.csv"))
+
+# uses log-expression values for series of samples, and needs design matrix
+limma_rlogc<-removeBatchEffect(x=rlog_control_se,
+                                  batch=conditions$study,
+                                  group=conditions$condition)
+
+
+saveRDS(limma_rlogc, file=here("Output/original_limma_rlogc.RData"))
+
+```
+
+plot dendrograms with and without batch correction 
+```{r dendro_no_batch}
+
+sample_cond <- read_csv(here("Data/control_conditions_df.csv"), col_names=T)
+
+# Create color mapping for each study
+study_levels <- unique(sample_cond$study)
+cols <- c("#66A61E", "#E7298A", "#E6AB02", "#1B9E77", "#D95F02", "#7570B3")
+names(cols) <- study_levels
+# Assign colors to samples based on their study
+sample_colors <- cols[sample_cond$study]
+
+# Create dendrogram
+hc_logc <- hclust(dist(t(rlog_control_se)),method="ward")
+dend_logc <- as.dendrogram(hc_logc)
+
+# Get sample labels from dendrogram
+dend_labels <- labels(dend_logc)
+
+# Reorder sample_cond to match dendrogram order
+ordered_cond <- sample_cond[match(dend_labels, sample_cond$sample), ]
+
+# Extract reordered colors and conditions
+ordered_colors <- cols[ordered_cond$study]
+ordered_labels <- ordered_cond$condition
+
+# Apply labels and colors to dendrogram
+dend_colored <- dend_logc %>%
+  set("labels_colors", ordered_colors) %>%
+  set("labels_cex", 0.8) %>%
+  set("labels", ordered_labels)
+
+# Plot dendrogram
+sizeGrWindow(25, 4)
+par(cex = 0.8, mar = c(6, 6, 5, 2))
+plot(dend_colored, main = "Dendrogram rlog transformed")
+
+# Add legend with correct color-study mapping
+legend("topright",
+       legend = names(cols),
+       fill = cols,
+       cex = 1.2,
+       pt.cex = 2)
+#add rectangles around each cluster 
+#14 clusters as there are 14 conditions 
+rect.hclust(hc_logc, k=4)
+
+```
+
+```{r dendrogram_limma_controls, echo=TRUE}
+
+#dendrogram for rlog transformed data with batch correction
+
+limma_rlogc <- readRDS(file=here("Output/original_limma_rlogc.RData"))
+sample_cond <- read_csv(here("Data/control_conditions_df.csv"), col_names=T)
+
+# Create color mapping for each study
+study_levels <- unique(sample_cond$study)
+cols <- c("#66A61E", "#E7298A", "#E6AB02", "#1B9E77", "#D95F02", "#7570B3")
+names(cols) <- study_levels
+# Assign colors to samples based on their study
+sample_colors <- cols[sample_cond$study]
+
+# Create dendrogram
+hc_logc <- hclust(dist(t(
+  limma_rlogc)), method = "ward")
+dend_logc <- as.dendrogram(hc_logc)
+
+# Get sample labels from dendrogram
+dend_labels <- labels(dend_logc)
+
+# Reorder sample_cond to match dendrogram order
+ordered_cond <- sample_cond[match(dend_labels, sample_cond$sample), ]
+
+# Extract reordered colors and conditions
+ordered_colors <- cols[ordered_cond$study]
+ordered_labels <- ordered_cond$condition
+
+# Apply labels and colors to dendrogram
+dend_colored <- dend_logc %>%
+  set("labels_colors", ordered_colors) %>%
+  set("labels_cex", 0.8) %>%
+  set("labels", ordered_labels)
+
+# Plot dendrogram
+sizeGrWindow(25, 4)
+par(cex = 0.8, mar = c(6, 6, 5, 2))
+plot(dend_colored, main = "Dendrogram rlog transformed and batch corrected")
+
+# Add legend with correct color-study mapping
+legend("topright",
+       legend = names(cols),
+       fill = cols,
+       cex = 1.2,
+       pt.cex = 2)
+
+```
+## 8) check if splitting paired and single data helps 
+
+```{r make_counts_matrix_paired}
+# read in count files for dataset
+set_a<-read.delim(here("Output/PRJNA694147/PRJNA694147_Combined_Counts.csv"), header=T)
+set_b<-read.delim(here("Output/PRJNA886436/PRJNA886436_Combined_Counts.csv"), header=T)
+set_c<-read.delim(here("Output/PRJNA917642/PRJNA917642_Combined_Counts.csv"), header=T)
+set_d<-read.delim(here("Output/PRJNA1001307/PRJNA1001307_Combined_Counts.csv"), header=T)
+
+# List of sets
+sets <- list(set_a, set_b,set_c, set_d)
+
+# Find common row names
+common_rows <- Reduce(intersect, lapply(sets, rownames))
+
+# Subset each set to common rows
+aligned_sets <- lapply(sets, function(df) df[common_rows, , drop = FALSE])
+
+# Column-bind the aligned sets
+countdata <- do.call(cbind, aligned_sets)
+
+#create a combined count matrix for all features 
+#countdata<-cbind(set_a, set_b, set_c, set_d, set_e, set_f)
+colnames(countdata)
+colnames(countdata) <- gsub("\\_sorted$","",colnames(countdata))
+#remove final_ from sample names
+colnames(countdata) <- gsub("^final_", "", colnames(countdata))
+#sort samples  
+countdata <- countdata[, order(names(countdata))]
+colnames(countdata)
+
+#inspection of count matrix 
+head(countdata)
+tail(countdata)
+nrow(countdata)
+length(countdata)
+
+#save count data as R object
+saveRDS(countdata, here("Output/paired_count_matrix.RData"))
+#write table of count matrix (has gene names as row names)
+write.csv(countdata, here("Output/paired_count_matrix.csv"), quote=F, row.names = T)
+```
+
+```{r make_counts_matrix_single}
+# read in count files for dataset
+#single
+set_e<-read.delim(here("Output/count_output_PRJNA313774/PRJNA313774_original_Counts.csv"), header=T)
+set_f<-read.delim(here("Output/count_output_PRJNA295556/PRJNA295556_original_Counts.csv"), header=T)
+
+
+# List of sets
+sets <- list(set_e, set_f)
+
+# Find common row names
+common_rows <- Reduce(intersect, lapply(sets, rownames))
+
+# Subset each set to common rows
+aligned_sets <- lapply(sets, function(df) df[common_rows, , drop = FALSE])
+
+# Column-bind the aligned sets
+countdata <- do.call(cbind, aligned_sets)
+
+#create a combined count matrix for all features 
+#countdata<-cbind(set_a, set_b, set_c, set_d, set_e, set_f)
+colnames(countdata)
+colnames(countdata) <- gsub("\\_sorted$","",colnames(countdata))
+#remove final_ from sample names
+colnames(countdata) <- gsub("^final_", "", colnames(countdata))
+#sort samples  
+countdata <- countdata[, order(names(countdata))]
+colnames(countdata)
+
+#inspection of count matrix 
+head(countdata)
+tail(countdata)
+nrow(countdata)
+length(countdata)
+
+#save count data as R object
+saveRDS(countdata, here("Output/single_count_matrix.RData"))
+#write table of count matrix (has gene names as row names)
+write.csv(countdata, here("Output/single_count_matrix.csv"), quote=F, row.names = T)
+```
+
+Paired
+```{r create DESeq data set paired}
+# load count matrix
+countdata <- readRDS(here("Output/paired_count_matrix.RData"))
+#change df to intigers but maintain rownames 
+rownames_df <- rownames(countdata)
+countdata <- data.frame(lapply(countdata, function(x) as.integer(as.character(x))))
+rownames(countdata) <- rownames_df
+
+control_conditions.df<-read.csv(here("Data/paired_control_conditions_df.csv"))
+#this step defined control samples as the base reference 
+control_conditions.df$condition <- factor(control_conditions.df$condition)
+control_conditions.df$condition <- relevel(control_conditions.df$condition, "Control") 
+#if the metadata is somehow already ordered, this line unorders it 
+control_conditions.df$condition <- factor(control_conditions.df$condition, ordered = FALSE)
+#convert study to factor
+control_conditions.df$study <- factor(control_conditions.df$study)
+
+
+control_conditions.df <- control_conditions.df[order(control_conditions.df$sample), ]
+#check order is same for count data and conditions data
+all(control_conditions.df$sample == colnames(countdata))
+#save datafiles following modifications
+saveRDS(countdata, here("Output/paired_count_matrix.RData"))
+write.csv(control_conditions.df, here("Data/paired_control_conditions_df.csv"), quote=F, row.names = F)
+
+#construct deseq dataset
+dds_control<-DESeqDataSetFromMatrix(countData = countdata,
+                              colData = control_conditions.df,
+                              design = ~study+condition)
+# pre-filter reads to exclude rows with very low expression--makes more efficient
+keep <- rowSums(counts(dds_control)) >= 10
+dds_filtered <- dds_control[keep,]
+
+```
+
+```{r transform and normalise}
+#untransformed counts 
+dds.untransformed <- assay(dds_filtered)
+
+#size factor normalised
+#calculate size factor
+dds_filtered<-estimateSizeFactors(dds_filtered)
+sizeFactors(dds_filtered)
+#normalised read counts
+counts_normalized<-counts(dds_filtered, normalized=TRUE)
+
+#log2 transformed
+logcounts <- log2(counts(dds_filtered, normalized=FALSE) + 1 )
+#rlog transformed
+# rlog blind=T
+rlog_control<-rlog(dds_filtered)
+# assay() creates summarized experiment ('se') which is matrix where rows are genetic features and columns are samples
+rlog_control_se<-assay(rlog_control)
+
+# carry out batch correction 
+conditions<-read.csv(here("Data/paired_control_conditions_df.csv"))
+
+# uses log-expression values for series of samples, and needs design matrix
+limma_rlogc<-removeBatchEffect(x=rlog_control_se,
+                                  batch=conditions$study,
+                                  group=conditions$condition)
+
+
+saveRDS(limma_rlogc, file=here("Output/paired_limma_rlogc.RData"))
+
+```
+
+plot dendrograms with and without batch correction 
+```{r dendro_no_batch}
+
+sample_cond <- read_csv(here("Data/paired_control_conditions_df.csv"), col_names=T)
+
+# Create color mapping for each study
+study_levels <- unique(sample_cond$study)
+cols <- c("#66A61E", "#E7298A", "#E6AB02", "#1B9E77", "#D95F02", "#7570B3")
+names(cols) <- study_levels
+# Assign colors to samples based on their study
+sample_colors <- cols[sample_cond$study]
+
+# Create dendrogram
+hc_logc <- hclust(dist(t(rlog_control_se)),method="ward")
+dend_logc <- as.dendrogram(hc_logc)
+
+# Get sample labels from dendrogram
+dend_labels <- labels(dend_logc)
+
+# Reorder sample_cond to match dendrogram order
+ordered_cond <- sample_cond[match(dend_labels, sample_cond$sample), ]
+
+# Extract reordered colors and conditions
+ordered_colors <- cols[ordered_cond$study]
+ordered_labels <- ordered_cond$condition
+
+# Apply labels and colors to dendrogram
+dend_colored <- dend_logc %>%
+  set("labels_colors", ordered_colors) %>%
+  set("labels_cex", 0.8) %>%
+  set("labels", ordered_labels)
+
+# Plot dendrogram
+sizeGrWindow(25, 4)
+par(cex = 0.8, mar = c(6, 6, 5, 2))
+plot(dend_colored, main = "Dendrogram rlog transformed")
+
+# Add legend with correct color-study mapping
+legend("topright",
+       legend = names(cols),
+       fill = cols,
+       cex = 1.2,
+       pt.cex = 2)
+#add rectangles around each cluster 
+#14 clusters as there are 14 conditions 
+rect.hclust(hc_logc, k=3)
+
+```
+```{r dendrogram_limma_controls, echo=TRUE}
+
+#dendrogram for rlog transformed data with batch correction
+
+limma_rlogc <- readRDS(file=here("Output/paired_limma_rlogc.RData"))
+sample_cond <- read_csv(here("Data/paired_control_conditions_df.csv"), col_names=T)
+
+# Create color mapping for each study
+study_levels <- unique(sample_cond$study)
+cols <- c("#66A61E", "#E7298A", "#E6AB02", "#1B9E77", "#D95F02", "#7570B3")
+names(cols) <- study_levels
+# Assign colors to samples based on their study
+sample_colors <- cols[sample_cond$study]
+
+# Create dendrogram
+hc_logc <- hclust(dist(t(
+  limma_rlogc)), method = "ward")
+dend_logc <- as.dendrogram(hc_logc)
+
+# Get sample labels from dendrogram
+dend_labels <- labels(dend_logc)
+
+# Reorder sample_cond to match dendrogram order
+ordered_cond <- sample_cond[match(dend_labels, sample_cond$sample), ]
+
+# Extract reordered colors and conditions
+ordered_colors <- cols[ordered_cond$study]
+ordered_labels <- ordered_cond$condition
+
+# Apply labels and colors to dendrogram
+dend_colored <- dend_logc %>%
+  set("labels_colors", ordered_colors) %>%
+  set("labels_cex", 0.8) %>%
+  set("labels", ordered_labels)
+
+# Plot dendrogram
+sizeGrWindow(25, 4)
+par(cex = 0.8, mar = c(6, 6, 5, 2))
+plot(dend_colored, main = "Dendrogram rlog transformed and batch corrected")
+
+# Add legend with correct color-study mapping
+legend("topright",
+       legend = names(cols),
+       fill = cols,
+       cex = 1.2,
+       pt.cex = 2)
+rect.hclust(hc_logc, k=7)
+```
+single
+```{r create DESeq data set single}
+# load count matrix
+countdata <- readRDS(here("Output/single_count_matrix.RData"))
+#change df to intigers but maintain rownames 
+rownames_df <- rownames(countdata)
+countdata <- data.frame(lapply(countdata, function(x) as.integer(as.character(x))))
+rownames(countdata) <- rownames_df
+
+control_conditions.df<-read.csv(here("Data/single_control_conditions_df.csv"))
+#this step defined control samples as the base reference 
+control_conditions.df$condition <- factor(control_conditions.df$condition)
+control_conditions.df$condition <- relevel(control_conditions.df$condition, "Control") 
+#if the metadata is somehow already ordered, this line unorders it 
+control_conditions.df$condition <- factor(control_conditions.df$condition, ordered = FALSE)
+#convert study to factor
+control_conditions.df$study <- factor(control_conditions.df$study)
+
+
+control_conditions.df <- control_conditions.df[order(control_conditions.df$sample), ]
+#check order is same for count data and conditions data
+all(control_conditions.df$sample == colnames(countdata))
+#save datafiles following modifications
+saveRDS(countdata, here("Output/single_count_matrix.RData"))
+write.csv(control_conditions.df, here("Data/single_control_conditions_df.csv"), quote=F, row.names = F)
+
+#construct deseq dataset
+dds_control<-DESeqDataSetFromMatrix(countData = countdata,
+                              colData = control_conditions.df,
+                              design = ~study+condition)
+# pre-filter reads to exclude rows with very low expression--makes more efficient
+keep <- rowSums(counts(dds_control)) >= 10
+dds_filtered <- dds_control[keep,]
+
+```
+
+```{r transform and normalise}
+#untransformed counts 
+dds.untransformed <- assay(dds_filtered)
+
+#size factor normalised
+#calculate size factor
+dds_filtered<-estimateSizeFactors(dds_filtered)
+sizeFactors(dds_filtered)
+#normalised read counts
+counts_normalized<-counts(dds_filtered, normalized=TRUE)
+
+#log2 transformed
+logcounts <- log2(counts(dds_filtered, normalized=FALSE) + 1 )
+#rlog transformed
+# rlog blind=T
+rlog_control<-rlog(dds_filtered)
+# assay() creates summarized experiment ('se') which is matrix where rows are genetic features and columns are samples
+rlog_control_se<-assay(rlog_control)
+
+# carry out batch correction 
+conditions<-read.csv(here("Data/single_control_conditions_df.csv"))
+
+# uses log-expression values for series of samples, and needs design matrix
+limma_rlogc<-removeBatchEffect(x=rlog_control_se,
+                                  batch=conditions$study,
+                                  group=conditions$condition)
+
+
+saveRDS(limma_rlogc, file=here("Output/single_limma_rlogc.RData"))
+
+```
+
+plot dendrograms with and without batch correction 
+```{r dendro_no_batch}
+
+sample_cond <- read_csv(here("Data/single_control_conditions_df.csv"), col_names=T)
+
+# Create color mapping for each study
+study_levels <- unique(sample_cond$study)
+cols <- c("#66A61E", "#E7298A", "#E6AB02", "#1B9E77", "#D95F02", "#7570B3")
+names(cols) <- study_levels
+# Assign colors to samples based on their study
+sample_colors <- cols[sample_cond$study]
+
+# Create dendrogram
+hc_logc <- hclust(dist(t(rlog_control_se)),method="ward")
+dend_logc <- as.dendrogram(hc_logc)
+
+# Get sample labels from dendrogram
+dend_labels <- labels(dend_logc)
+
+# Reorder sample_cond to match dendrogram order
+ordered_cond <- sample_cond[match(dend_labels, sample_cond$sample), ]
+
+# Extract reordered colors and conditions
+ordered_colors <- cols[ordered_cond$study]
+ordered_labels <- ordered_cond$condition
+
+# Apply labels and colors to dendrogram
+dend_colored <- dend_logc %>%
+  set("labels_colors", ordered_colors) %>%
+  set("labels_cex", 0.8) %>%
+  set("labels", ordered_labels)
+
+# Plot dendrogram
+sizeGrWindow(25, 4)
+par(cex = 0.8, mar = c(6, 6, 5, 2))
+plot(dend_colored, main = "Dendrogram rlog transformed")
+
+# Add legend with correct color-study mapping
+legend("topright",
+       legend = names(cols),
+       fill = cols,
+       cex = 1.2,
+       pt.cex = 2)
+#add rectangles around each cluster 
+#14 clusters as there are 14 conditions 
+rect.hclust(hc_logc, k=2)
+
+```
+```{r dendrogram_limma_controls, echo=TRUE}
+
+#dendrogram for rlog transformed data with batch correction
+
+limma_rlogc <- readRDS(file=here("Output/single_limma_rlogc.RData"))
+sample_cond <- read_csv(here("Data/single_control_conditions_df.csv"), col_names=T)
+
+# Create color mapping for each study
+study_levels <- unique(sample_cond$study)
+cols <- c("#66A61E", "#E7298A", "#E6AB02", "#1B9E77", "#D95F02", "#7570B3")
+names(cols) <- study_levels
+# Assign colors to samples based on their study
+sample_colors <- cols[sample_cond$study]
+
+# Create dendrogram
+hc_logc <- hclust(dist(t(
+  limma_rlogc)), method = "ward")
+dend_logc <- as.dendrogram(hc_logc)
+
+# Get sample labels from dendrogram
+dend_labels <- labels(dend_logc)
+
+# Reorder sample_cond to match dendrogram order
+ordered_cond <- sample_cond[match(dend_labels, sample_cond$sample), ]
+
+# Extract reordered colors and conditions
+ordered_colors <- cols[ordered_cond$study]
+ordered_labels <- ordered_cond$condition
+
+# Apply labels and colors to dendrogram
+dend_colored <- dend_logc %>%
+  set("labels_colors", ordered_colors) %>%
+  set("labels_cex", 0.8) %>%
+  set("labels", ordered_labels)
+
+# Plot dendrogram
+sizeGrWindow(25, 4)
+par(cex = 0.8, mar = c(6, 6, 5, 2))
+plot(dend_colored, main = "Dendrogram rlog transformed and batch corrected")
+
+# Add legend with correct color-study mapping
+legend("topright",
+       legend = names(cols),
+       fill = cols,
+       cex = 1.2,
+       pt.cex = 2)
+
+```
+checking coverage in R code if needed again  
+
+```{#r}
+# Load libraries
+library(Rsamtools)
+library(GenomicAlignments)
+
+# Define BAM file path
+bam_file <- dir <- here("Data/PRJNA694147/ORIGINAL/SRR13509749_sorted.bam")
+
+# Create BamFile object
+bam <- BamFile(bam_file)
+
+# Compute coverage
+cov <- coverage(readGAlignments(bam))
+
+sum <- summary(cov$CU458896.1)
+
+
+```
+

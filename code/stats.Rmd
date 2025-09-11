@@ -1,0 +1,306 @@
+---
+title: "graphs"
+output: pdf_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Load necessary libraries
+library(ggplot2)
+library(here)
+library(patchwork)
+```
+
+## Mapping stats
+
+
+```{r}
+
+paired <- read.csv(here( "stats", "Paired_mapping_percent.csv"), header = TRUE)
+paired$Dataset.Acession <- factor(paired$Dataset.Acession, levels = unique(paired$Dataset.Acession))
+summary(paired)
+
+single <- read.csv(here( "stats", "Single_mapping_percent.csv"), header = TRUE)
+single$Dataset.Acession <- factor(single$Dataset.Acession, levels = unique(single$Dataset.Acession))
+summary(single)
+```
+
+```{r, fig.width=10, fig.height=10}
+my_palette <- c(
+  "#A9A9A9",
+  "#D3D3D3",
+  "#1C1C1C",
+  "#4F4F4F"
+)
+
+
+# Create a bar plot
+ggplot(paired, aes(x = Sample, y = Mapping.Percent, fill= Dataset.Acession)) +
+  # Change the legend title
+  geom_col() +
+  guides(fill = guide_legend(title = "Dataset Accessions")) +
+  scale_fill_manual(values = my_palette)+
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.text = element_text(size = 12),  # Adjust font size for readability
+    axis.title = element_text(size = 14, face = "bold"),  # Make axis titles bold
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),  # Center and bold the title
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 14)
+  ) +
+   geom_hline(yintercept = 90, color = "black", size = 1.5, linetype = "dashed") +
+  labs(title = "Paired Mapping Percent", x = "Samples", y = "Mapping %") +
+  #add labels to all samples below mapping criteria
+  geom_text(
+    data = subset(paired, Mapping.Percent < 90),  # Only label bars with mapping < 80%
+    aes(label = Sample),  # Label with accession code instead of mapping %
+    vjust = -0.5,
+    size = 3,  # Adjust text size
+    color = "black")
+ggsave(here("Results/Paired_mapping_percentage.png"))
+
+```
+
+```{r, fig.width=10, fig.height=10}
+my_palette <- c(
+  "#1F77B4",
+  "#5DADE2"
+)
+
+# Create a bar plot
+ggplot(single, aes(x = Sample, y = Mapping.Percent, fill= Dataset.Acession)) +
+  # Change the legend title
+  geom_col() +
+  guides(fill = guide_legend(title = "Dataset Accessions")) +
+  scale_fill_manual(values = my_palette)+
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_text(size = 12),  # Adjust font size for readability
+    axis.title = element_text(size = 14, face = "bold"),  # Make axis titles bold
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),  # Center and bold the title
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 14)
+  ) +
+  geom_hline(yintercept = 80, color = "blue", size = 1.5, linetype = "dashed") +
+  labs(title = "Single Mapping Percent", x = "Samples", y = "Mapping %") +
+  geom_text(
+    data = subset(single, Mapping.Percent < 80),  # Only label bars with mapping < 80%
+    aes(label = Sample),  # Label with accession code instead of mapping %
+    vjust = -0.5,
+    size = 3,  # Adjust text size
+    color = "black" ) 
+
+ggsave(here("Results/Single_mapping_percentage.png"))
+
+```
+
+Boxplots of intergenic sample coverage per dataset
+
+```{r}
+#create a boxplot of all the quantile values for each adataset 
+library(tidyr)
+coverage <- read.csv(here("Results/All_datasets_coverage.csv"), header = TRUE)
+
+summary(coverage)
+head(coverage)
+
+# Reshape the data to long format
+coverage_long <- pivot_longer(coverage, cols = P25:P90, names_to = "Quantile", values_to = "Value")
+
+
+ggplot(coverage_long, aes(x = Dataset, y = Value)) +
+  geom_boxplot(fill = "#5DADE2", color = "black") +
+    labs(
+    title = "Distribution of Coverage Values by Dataset",
+    x = "Dataset",
+    y = "Value"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.title = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.text.x = element_text(size = 10)
+  )
+
+ggsave(here("Results/Coverage_boxplot.png"))
+```
+
+```{r}
+# Create boxplot of P90 values grouped by Dataset
+ggplot(coverage, aes(x = Dataset, y = P90)) +
+  geom_boxplot(fill = "#5DADE2", color = "black") +
+  labs(
+    title = "Distribution of P90 Coverage Values by Dataset",
+    x = "Dataset",
+    y = "P90 Value"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.title = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.text.x = element_text(size = 10)
+  )
+
+ggsave(here("Results/P90_Coverage_boxplot.png"))
+```
+
+Create a barplot for predicted ncRNAs in each dataset by type 
+
+```{r}
+library(ggplot2)
+library(patchwork)
+library(readr)
+library(here)
+# Load RColorBrewer for palettes
+library(RColorBrewer)
+
+# Define your categories
+categories <- c(
+  "3' UTRs",
+  "5' UTRs",
+  "Antisense RNA (sRNA)",
+  "Between UTRs (sRNA)",
+  "Intergenic RNA (minus strand) (sRNA)",
+  "Intergenic RNA (plus strand) (sRNA)",
+  "Overlapping a gene (sRNA)",
+  "Unassigned UTRs",
+  "Total original annotations",
+  "Annotations produced by baerhunter",
+  "Overlapping annotations",
+  "Overlapping original annotations"
+)
+
+# Assign colors using Set3 palette (or define your own hex codes)
+category_colors <- setNames(brewer.pal(12, "Set3"), categories)
+
+
+# Load datasets
+gr1 <- read.csv(here("Output/PRJNA1001307/PRJNA1001307_400,700_count.csv"), header = TRUE)
+gr2 <- read.csv(here("Output/PRJNA694147/PRJNA694147_300,500_count.csv"), header = TRUE)
+gr3 <- read.csv(here("Output/PRJNA313774/PRJNA313774_200,400_count.csv"), header = TRUE)
+gr4 <- read.csv(here("Output/PRJNA295556/PRJNA295556_50,100_count.csv"), header = TRUE)
+gr5 <- read.csv(here("Output/PRJNA917642/PRJNA917642_150,250_count.csv"), header = TRUE)
+gr6 <- read.csv(here("Output/PRJNA886436/PRJNA886436_500,700_count.csv"), header = TRUE)
+
+# Function to create each plot
+make_plot <- function(data, title) {
+  ggplot(data, aes(x = Type, y = Count, fill = Type)) +
+    geom_col() +
+    theme_minimal() +
+    scale_fill_manual(values = category_colors, drop = FALSE) +  
+    # drop = FALSE keeps all colors 
+    labs(title = title, fill = "Type") +
+    scale_y_continuous(limits=c(0,3000)) +
+    theme(
+      axis.text.x = element_blank(),       # Remove x-axis tick labels
+      axis.title.x = element_blank(),      # Remove x-axis title
+      plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+    )
+}
+
+# Create plots
+plot1 <- make_plot(gr1, "PRJNA1001307")
+plot2 <- make_plot(gr2, "PRJNA694147")
+plot3 <- make_plot(gr3, "PRJNA313774")
+plot4 <- make_plot(gr4, "PRJNA295556")
+plot5 <- make_plot(gr5, "PRJNA917642")
+plot6 <- make_plot(gr6, "PRJNA886436")
+# Combine plots with shared legend
+combined_plot <- (plot1 | plot2) /
+                 (plot3 | plot4) /
+                 (plot5 | plot6) +
+                 plot_layout(guides = "collect") &
+                 theme(legend.position = "bottom",
+                       legend.text = element_text(size = 7),
+                       legend.title = element_blank())
+                 
+
+# Display the plot
+print(combined_plot)
+
+# Save the plot
+ggsave(here("Results", "Baerhunter_predictions.png"), combined_plot,
+       width = 8.27, height = 11.69, units = "in", dpi = 1000)
+```
+Create the same plot for filtered files 
+```{r}
+library(ggplot2)
+library(patchwork)
+library(readr)
+library(here)
+# Load RColorBrewer for palettes
+library(RColorBrewer)
+
+# Define your categories
+categories <- c(
+  "3' UTRs",
+  "5' UTRs",
+  "Antisense RNA (sRNA)",
+  "Between UTRs (sRNA)",
+  "Intergenic RNA (minus strand) (sRNA)",
+  "Intergenic RNA (plus strand) (sRNA)",
+  "Overlapping a gene (sRNA)",
+  "Unassigned UTRs",
+  "Total original annotations",
+  "Annotations produced by baerhunter",
+  "Overlapping annotations",
+  "Overlapping original annotations"
+)
+
+# Assign colors using Set3 palette (or define your own hex codes)
+category_colors <- setNames(brewer.pal(12, "Set3"), categories)
+
+
+# Load datasets
+gr1 <- read.csv(here("Output/PRJNA1001307/PRJNA1001307_filtered_count.csv"), header = TRUE)
+gr2 <- read.csv(here("Output/PRJNA694147/PRJNA694147_filtered_count.csv"), header = TRUE)
+gr3 <- read.csv(here("Output/PRJNA313774/PRJNA313774_filtered_count.csv"), header = TRUE)
+gr4 <- read.csv(here("Output/PRJNA295556/PRJNA295556_filtered_count.csv"), header = TRUE)
+gr5 <- read.csv(here("Output/PRJNA917642/PRJNA917642_filtered_count.csv"), header = TRUE)
+gr6 <- read.csv(here("Output/PRJNA886436/PRJNA886436_filtered_count.csv"), header = TRUE)
+
+# Function to create each plot
+make_plot <- function(data, title) {
+  ggplot(data, aes(x = Type, y = Count, fill = Type)) +
+    geom_col() +
+    theme_minimal() +
+    scale_fill_manual(values = category_colors, drop = FALSE) +  
+    # drop = FALSE keeps all colors 
+    labs(title = title, fill = "Type") +
+    scale_y_continuous(limits=c(0,200)) +
+    theme(
+      axis.text.x = element_blank(),       # Remove x-axis tick labels
+      axis.title.x = element_blank(),      # Remove x-axis title
+      plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+    )
+}
+
+# Create plots
+plot1 <- make_plot(gr1, "PRJNA1001307")
+plot2 <- make_plot(gr2, "PRJNA694147")
+plot3 <- make_plot(gr3, "PRJNA313774")
+plot4 <- make_plot(gr4, "PRJNA295556")
+plot5 <- make_plot(gr5, "PRJNA917642")
+plot6 <- make_plot(gr6, "PRJNA886436")
+# Combine plots with shared legend
+combined_plot <- (plot1 | plot2) /
+                 (plot3 | plot4) /
+                 (plot5 | plot6) +
+                 plot_layout(guides = "collect") &
+                 theme(legend.position = "bottom",
+                       legend.text = element_text(size = 7),
+                       legend.title = element_blank())
+                 
+
+# Display the plot
+print(combined_plot)
+
+# Save the plot
+ggsave(here("Results", "Filtered_Baerhunter_predictions.png"), combined_plot,
+       width = 8.27, height = 11.69, units = "in", dpi = 1000)
+```
+
