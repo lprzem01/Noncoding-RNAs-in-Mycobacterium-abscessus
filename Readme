@@ -1,14 +1,3 @@
-# Example headings
-
-## Sample Section
-
-## This'll be a _Helpful_ Section About the Greek Letter Θ!
-A heading containing characters not allowed in fragments, UTF-8 characters, two consecutive spaces between the first and second words, and formatting.
-
-## This heading is not unique in the file
-
-
-
 # Analysis of Unannotated Expressed Regions in Transcriptomic Data from Mycobacterium Abscessus 
 ## PROJECT OVERVIEW
 <p> This repository provides all supplementary information, figures, detailed analysis results, and reproducible scripts used at each stage of RNA-seq data processing and downstream analysis pipeline. The workflow documented here includes raw data quality control (QC), preprocessing (trimming), mapping/alignment, and downstream analysis using BaerHunter and DESeq2.</p>
