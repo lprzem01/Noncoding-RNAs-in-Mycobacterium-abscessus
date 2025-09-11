@@ -1,5 +1,15 @@
-<h1> Analysis of Unannotated Expressed Regions in Transcriptomic Data from Mycobacterium Abscessus </h1>
+# Example headings
 
+## Sample Section
+
+## This'll be a _Helpful_ Section About the Greek Letter Θ!
+A heading containing characters not allowed in fragments, UTF-8 characters, two consecutive spaces between the first and second words, and formatting.
+
+## This heading is not unique in the file
+
+
+
+# Analysis of Unannotated Expressed Regions in Transcriptomic Data from Mycobacterium Abscessus 
 ## PROJECT OVERVIEW
 <p> This repository provides all supplementary information, figures, detailed analysis results, and reproducible scripts used at each stage of RNA-seq data processing and downstream analysis pipeline. The workflow documented here includes raw data quality control (QC), preprocessing (trimming), mapping/alignment, and downstream analysis using BaerHunter and DESeq2.</p>
 # SUPPLEMENTARY INFORMATION
@@ -28,7 +38,7 @@ To replicate the analysis, ensure the following software is installed:
 •	ggplot2, pheatmap, and other R packages for visualization
 See  sessionInfo.R for exact package versions.
 
-#USAGE INSTRUCTIONS
+# USAGE INSTRUCTIONS
 •	Clone the repository:
 •	git clone [URL]
 •	Install required dependencies (see above)
