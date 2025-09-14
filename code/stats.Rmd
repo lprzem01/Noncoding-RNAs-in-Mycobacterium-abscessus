@@ -11,6 +11,7 @@ knitr::opts_chunk$set(echo = TRUE)
 library(ggplot2)
 library(here)
 library(patchwork)
+library(ggrepel)
 ```
 
 ## Mapping stats
@@ -27,21 +28,21 @@ single$Dataset.Acession <- factor(single$Dataset.Acession, levels = unique(singl
 summary(single)
 ```
 
-```{r, fig.width=10, fig.height=10}
-my_palette <- c(
-  "#A9A9A9",
-  "#D3D3D3",
-  "#1C1C1C",
-  "#4F4F4F"
-)
-
+```{r, fig.width=10, fig.height=5}
+conditions <- read_csv(here("Data/control_conditions_df.csv"), col_names=T)
+# Create color mapping for each study
+study_levels <- unique(conditions$study)
+cols <- c("#66A61E", "#E7298A", "#E6AB02", "#1B9E77", "#D95F02", "#7570B3")
+names(cols) <- study_levels
+# Assign colors to samples based on their study
+sample_colors <- cols[conditions$study]
 
 # Create a bar plot
 ggplot(paired, aes(x = Sample, y = Mapping.Percent, fill= Dataset.Acession)) +
   # Change the legend title
   geom_col() +
-  guides(fill = guide_legend(title = "Dataset Accessions")) +
-  scale_fill_manual(values = my_palette)+
+  guides(fill = guide_legend(title = "")) +
+  scale_fill_manual(values = sample_colors)+
   theme_minimal() +
   theme(
     axis.text.x = element_blank(),
@@ -49,33 +50,37 @@ ggplot(paired, aes(x = Sample, y = Mapping.Percent, fill= Dataset.Acession)) +
     axis.title = element_text(size = 14, face = "bold"),  # Make axis titles bold
     plot.title = element_text(size = 16, face = "bold", hjust = 0.5),  # Center and bold the title
     legend.text = element_text(size = 12),
-    legend.title = element_text(size = 14)
+    legend.title = element_text(size = 14),
+    legend.position = "bottom"
   ) +
-   geom_hline(yintercept = 90, color = "black", size = 1.5, linetype = "dashed") +
+   geom_hline(yintercept = 90, color = "black", size = 1, linetype = "dashed") +
   labs(title = "Paired Mapping Percent", x = "Samples", y = "Mapping %") +
   #add labels to all samples below mapping criteria
-  geom_text(
+  geom_text_repel(
     data = subset(paired, Mapping.Percent < 90),  # Only label bars with mapping < 80%
     aes(label = Sample),  # Label with accession code instead of mapping %
     vjust = -0.5,
-    size = 3,  # Adjust text size
+    size = 3.5,  # Adjust text size
     color = "black")
 ggsave(here("Results/Paired_mapping_percentage.png"))
 
 ```
 
-```{r, fig.width=10, fig.height=10}
-my_palette <- c(
-  "#1F77B4",
-  "#5DADE2"
-)
+```{r, fig.width=10, fig.height=5}
+conditions <- read_csv(here("Data/control_conditions_df.csv"), col_names=T)
+# Create color mapping for each study
+study_levels <- unique(conditions$study)
+cols <- c("#66A61E", "#E7298A", "#E6AB02", "#1B9E77", "#D95F02", "#7570B3")
+names(cols) <- study_levels
+# Assign colors to samples based on their study
+sample_colors <- cols[conditions$study]
 
 # Create a bar plot
 ggplot(single, aes(x = Sample, y = Mapping.Percent, fill= Dataset.Acession)) +
   # Change the legend title
   geom_col() +
-  guides(fill = guide_legend(title = "Dataset Accessions")) +
-  scale_fill_manual(values = my_palette)+
+  guides(fill = guide_legend(title = "")) +
+  scale_fill_manual(values = sample_colors)+
   theme_minimal() +
   theme(
     axis.text.x = element_blank(),
@@ -83,17 +88,18 @@ ggplot(single, aes(x = Sample, y = Mapping.Percent, fill= Dataset.Acession)) +
     axis.title = element_text(size = 14, face = "bold"),  # Make axis titles bold
     plot.title = element_text(size = 16, face = "bold", hjust = 0.5),  # Center and bold the title
     legend.text = element_text(size = 12),
-    legend.title = element_text(size = 14)
+    legend.title = element_text(size = 14),
+    legend.position = "bottom"
   ) +
-  geom_hline(yintercept = 80, color = "blue", size = 1.5, linetype = "dashed") +
+  geom_hline(yintercept = 80, color = "blue", size = 1, linetype = "dashed") +
   labs(title = "Single Mapping Percent", x = "Samples", y = "Mapping %") +
-  geom_text(
+  geom_text_repel(
     data = subset(single, Mapping.Percent < 80),  # Only label bars with mapping < 80%
     aes(label = Sample),  # Label with accession code instead of mapping %
     vjust = -0.5,
-    size = 3,  # Adjust text size
-    color = "black" ) 
-
+    size = 3.5,  # Adjust text size
+    color = "black"
+    ) 
 ggsave(here("Results/Single_mapping_percentage.png"))
 
 ```
