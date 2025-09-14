@@ -1,10 +1,10 @@
-### Analysis of Unannotated Expressed Regions in Transcriptomic Data from Mycobacterium Abscessus 
+# Analysis of Unannotated Expressed Regions in Transcriptomic Data from Mycobacterium Abscessus 
 PROJECT OVERVIEW
 This repository provides all supplementary information, figures, detailed analysis results, and reproducible scripts used at each stage of RNA-seq data processing and downstream analysis pipeline. The workflow documented here includes raw data quality control (QC), preprocessing (trimming), mapping/alignment, and downstream analysis using BaerHunter and DESeq2.
 •	Supplementary tables with detailed statistics and sample metadata
 •	Additional figures illustrating QC metrics, mapping statistics, and differential expression tables
 
-PIPELINE OVERVIEW
+## PIPELINE OVERVIEW
 The data analysis workflow proceeds through the following stages:
 1.	Quality control (QC) of raw sequence data
 2.	Adapter and quality trimming of reads
@@ -14,7 +14,7 @@ The data analysis workflow proceeds through the following stages:
 6.	Differential expression analysis using BaerHunter and DESeq2
 7.	Visualization and figure preparation
 
-SOFTWARE AND REQUIREMENTS
+## SOFTWARE AND REQUIREMENTS
 To replicate the analysis, ensure the following software is installed:
 ⦁	Python (≥ 3.6) and R (≥ 4.0.0)
 ⦁	FastQC for initial QC
@@ -26,9 +26,9 @@ To replicate the analysis, ensure the following software is installed:
 ⦁	ggplot2, pheatmap, and other R packages for visualization
 ⦁	See  sessionInfo.txt for exact package versions.
 
-USAGE INSTRUCTIONS
+## USAGE INSTRUCTIONS
 Clone the repository:
-⦁	git clone [URL]
+⦁	git clone https://github.com/lprzem01/Noncoding-RNAs-in-Mycobacterium-abscessus.git
 ⦁	Install required dependencies (see above)
 ⦁	Download required datasets using the scripts provided
 ⦁	Review quality, trim and map the raw data to reference genome
